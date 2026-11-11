@@ -111,3 +111,8 @@ test('effect matches by action id', () => {
   assert.equal(steps[0].effect, 'pending');
   assert.equal(steps[0].effectExplanation, null);
 });
+
+test('looking at attachments gets its own row', () => {
+  const { steps } = group([obs(1), decision(2, 'p', { kind: 'view_attachments', attachment_ids: ['a1'] })]);
+  assert.deepEqual(steps.map((s) => s.summary), ['Looked at attached files']);
+});

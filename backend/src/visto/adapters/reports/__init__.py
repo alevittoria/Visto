@@ -43,11 +43,14 @@ _VALUE_TYPES = (
     models.ModelIdentity,
     models.ModelUsage,
     models.ArtifactRef,
+    models.AttachmentPage,
+    models.Finding,
     models.Assessment,
     models.EffectAssessment,
     models.Act,
     models.ObserveAfter,
     models.AskUser,
+    models.ViewAttachments,
     models.Conclude,
 )
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
@@ -74,6 +77,16 @@ def _value(value: object, run_id: str) -> object:
         raise ValueError("Unsupported report value")
     if hasattr(value, "run_id") and value.run_id != run_id:
         raise ValueError("Report value belongs to another run")
+    if type(value) is models.AttachmentPage:
+        if value.image.run_id != run_id:
+            raise ValueError("Report value belongs to another run")
+        # The page image's storage reference stays private; only a route is given.
+        return {
+            "type": "AttachmentPage",
+            **{f.name: getattr(value, f.name) for f in fields(value) if f.name != "image"},
+            "media_type": value.image.media_type,
+            "url": _attachment_url(run_id, value.attachment_id),
+        }
     result = {
         "type": type(value).__name__,
         **{
@@ -88,6 +101,28 @@ def _value(value: object, run_id: str) -> object:
         observation_id = _identifier(value.observation_id)
         result["screenshot"]["url"] = f"/api/runs/{run_id}/artifacts/{observation_id}"
     return result
+
+
+def _attachment_url(run_id: str, attachment_id: str) -> str:
+    return f"/api/runs/{run_id}/attachments/{_identifier(attachment_id)}"
+
+
+def _findings(run: Run, run_id: str) -> list[dict[str, object]]:
+    """The conclusion's findings with links derived from validated identifiers."""
+    if not isinstance(run.terminal, AIConclusion):
+        return []
+    return [
+        {
+            "explanation": finding.explanation,
+            "observation_ids": list(finding.observation_ids),
+            "attachment_ids": list(finding.attachment_ids),
+            "observation_urls": [
+                f"/api/runs/{run_id}/artifacts/{_identifier(i)}" for i in finding.observation_ids
+            ],
+            "attachment_urls": [_attachment_url(run_id, i) for i in finding.attachment_ids],
+        }
+        for finding in run.terminal.assessment.findings
+    ]
 
 
 def _outcome(run: Run) -> str:
@@ -160,6 +195,7 @@ def report_data(run: Run, history: Sequence[RunRecord]) -> dict[str, object]:
             "scope": "stored timestamps only; no live duration or inference latency is inferred",
         },
         "reported_usage": _usage(records),
+        "findings": _findings(run, run_id),
         "history": [_value(record, run_id) for record in records],
     }
 
@@ -183,13 +219,14 @@ def _html(value: object, key: str = "") -> str:
     if isinstance(value, list):
         if not value:
             return "<p>None recorded</p>"
-        return "<ol>" + "".join(f"<li>{_html(item)}</li>" for item in value) + "</ol>"
+        return "<ol>" + "".join(f"<li>{_html(item, key)}</li>" for item in value) + "</ol>"
     if value is None:
         return "<span>unknown / not recorded</span>"
-    if key == "url":
-        # This key is generated only for a validated Observation, never copied
+    if key in ("url", "observation_urls", "attachment_urls"):
+        # These keys are generated only from validated identifiers, never copied
         # from user text or storage_key. All values still receive HTML escaping.
-        return f'<a href="{escape(str(value), quote=True)}">Open screenshot</a>'
+        label = "Open attachment" if "/attachments/" in str(value) else "Open screenshot"
+        return f'<a href="{escape(str(value), quote=True)}">{label}</a>'
     return f"<pre>{escape(str(value), quote=True)}</pre>"
 
 
@@ -224,6 +261,18 @@ def render_html(run: Run, history: Sequence[RunRecord]) -> str:
         ("Reported usage", data["reported_usage"]),
     )
     body = "".join(f"<section><h2>{name}</h2>{_html(value)}</section>" for name, value in sections)
+    if data["findings"]:
+        # Differences the AI reported with its conclusion, beside the evidence they cite.
+        cited = {i for finding in data["findings"] for i in finding["attachment_ids"]}
+        uncited = [
+            f"{page['name']}, page {page['page']}"
+            for page in run_data["goal"]["attachments"]
+            if page["attachment_id"] not in cited
+        ]
+        body += f"<section><h2>Findings</h2>{_html(data['findings'])}"
+        if uncited:
+            body += f"<h3>Not cited by any finding</h3>{_html(uncited)}"
+        body += "</section>"
     body += "<section><h2>Ordered evidence history</h2>"
     if not data["history"]:
         body += "<p>No history recorded in this snapshot.</p>"

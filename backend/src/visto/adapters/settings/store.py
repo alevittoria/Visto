@@ -1,4 +1,9 @@
-"""User settings and the provider key, stored as JSON files in the Visto home."""
+"""User settings and the provider keys, stored as JSON files in the Visto home.
+
+The secrets file holds one `<provider>_api_key` field per AI provider. A file
+written before more providers existed holds only `openai_api_key` and stays valid
+unchanged; saving or removing one provider's key never touches another's.
+"""
 
 import json
 import os
@@ -6,6 +11,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from visto.adapters.ai.providers import DEFAULT_PROVIDER, PROVIDERS
 from visto.adapters.ios.signing import IOSSigning
 from visto.home import VistoHome, make_private_dir
 
@@ -23,6 +29,8 @@ class Settings:
     price_refresh: bool = True
     ios: IOSSigning = IOSSigning()
     ios_saved_for_xcuitest: str | None = None
+    # The active AI provider; absent from files written before providers were selectable.
+    provider: str = DEFAULT_PROVIDER
 
 
 @dataclass(frozen=True)
@@ -79,8 +87,10 @@ class SettingsStore:
         price_refresh = data.get("price_refresh", True)
         saved = data.get("ios_saved_for_xcuitest")
         ios = data.get("ios", {})
+        active = data.get("provider", DEFAULT_PROVIDER)
         if (
             type(price_refresh) is not bool
+            or not (isinstance(active, str) and active in PROVIDERS)
             or not (saved is None or isinstance(saved, str))
             or not isinstance(ios, dict)
         ):
@@ -91,7 +101,7 @@ class SettingsStore:
             isinstance(values[name], str) for name in _IOS_TEXT
         ):
             raise SettingsError("settings file is invalid")
-        return Settings(price_refresh, IOSSigning(**values), saved)
+        return Settings(price_refresh, IOSSigning(**values), saved, active)
 
     def save(self, settings: Settings) -> None:
         ios = settings.ios
@@ -108,19 +118,43 @@ class SettingsStore:
                     "wda_derived_data": ios.wda_derived_data,
                 },
                 "ios_saved_for_xcuitest": settings.ios_saved_for_xcuitest,
+                "provider": _known(settings.provider),
             },
         )
 
-    def api_key(self) -> str:
+    def _secrets(self) -> dict[str, str]:
+        """Stored non-empty keys by provider."""
         data = _read(self._home.secrets_file, "secrets")
         if data is None:
-            return ""
-        key = data.get("openai_api_key", "")
-        if not isinstance(key, str):
-            raise SettingsError("secrets file is invalid")
-        return key
+            return {}
+        keys = {}
+        for identifier in PROVIDERS:
+            key = data.get(_field(identifier), "")
+            if not isinstance(key, str):
+                raise SettingsError("secrets file is invalid")
+            if key:
+                keys[identifier] = key
+        return keys
 
-    def set_api_key(self, key: str) -> KeyStatus:
+    def _write_secrets(self, keys: dict[str, str]) -> None:
+        if not keys:
+            self._home.secrets_file.unlink(missing_ok=True)
+            return
+        fields = {
+            _field(identifier): keys[identifier] for identifier in PROVIDERS if identifier in keys
+        }
+        _write(self._home.secrets_file, {"format": FORMAT, **fields})
+
+    def api_key(self, provider: str = DEFAULT_PROVIDER) -> str:
+        return self._secrets().get(_known(provider), "")
+
+    def active(self) -> tuple[str, str]:
+        """The active provider and its stored key (empty when none is stored)."""
+        provider = self.load().provider
+        return provider, self.api_key(provider)
+
+    def set_api_key(self, key: str, provider: str = DEFAULT_PROVIDER) -> KeyStatus:
+        provider = _known(provider)
         key = key.strip() if isinstance(key, str) else ""
         if not key:
             raise SettingsError("the API key is empty")
@@ -128,13 +162,31 @@ class SettingsStore:
             raise SettingsError("the API key is too long")
         if not key.isprintable() or any(character.isspace() for character in key):
             raise SettingsError("the API key contains whitespace or control characters")
-        _write(self._home.secrets_file, {"format": FORMAT, "openai_api_key": key})
-        return self.key_status()
+        keys = self._secrets()
+        keys[provider] = key
+        self._write_secrets(keys)
+        return self.key_status(provider)
 
-    def delete_api_key(self) -> KeyStatus:
-        self._home.secrets_file.unlink(missing_ok=True)
-        return self.key_status()
+    def delete_api_key(self, provider: str = DEFAULT_PROVIDER) -> KeyStatus:
+        provider = _known(provider)
+        try:
+            keys = self._secrets()
+        except SettingsError:
+            keys = {}  # An unreadable file holds no usable key; removing it recovers.
+        if keys.pop(provider, None) is not None or not keys:
+            self._write_secrets(keys)
+        return self.key_status(provider)
 
-    def key_status(self) -> KeyStatus:
-        key = self.api_key()
+    def key_status(self, provider: str = DEFAULT_PROVIDER) -> KeyStatus:
+        key = self.api_key(provider)
         return KeyStatus(True, key[-4:]) if key else KeyStatus(False, None)
+
+
+def _known(provider: str) -> str:
+    if not isinstance(provider, str) or provider not in PROVIDERS:
+        raise SettingsError("the AI provider is not supported")
+    return provider
+
+
+def _field(provider: str) -> str:
+    return f"{provider}_api_key"

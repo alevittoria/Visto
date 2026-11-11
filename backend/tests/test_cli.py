@@ -78,6 +78,7 @@ def factory(root, steps):
                     "verdict": step,
                     "explanation": "Fake wire AI assessment",
                     "observation_ids": [meta["current_observation_id"]],
+                    "findings": [],
                 }
             else:
                 nxt = step
@@ -468,8 +469,8 @@ def test_run_rejects_an_unknown_platform(root, monkeypatch):
 @pytest.mark.parametrize(
     "platform,device_class,adapter,instructions",
     [
-        (Platform.ANDROID, AppiumDevice, "appium-wire-v1", "android-agent-v3"),
-        (Platform.IOS, XCUITestDevice, "appium-xcuitest-v1", "ios-agent-v1"),
+        (Platform.ANDROID, AppiumDevice, "appium-wire-v1", "android-agent-v4"),
+        (Platform.IOS, XCUITestDevice, "appium-xcuitest-v1", "ios-agent-v2"),
     ],
 )
 def test_runtime_selects_the_adapter_and_versions_from_the_platform(
@@ -563,12 +564,20 @@ def test_doctor_and_settings_dispatch(tmp_path, monkeypatch):
 
     calls = []
     monkeypatch.setattr(cli, "run_doctor", lambda home, **kw: calls.append((home, kw)) or 0)
-    monkeypatch.setattr(cli, "run_settings", lambda home, action: calls.append((home, action)) or 0)
+    monkeypatch.setattr(
+        cli,
+        "run_settings",
+        lambda home, action, provider: calls.append((home, action, provider)) or 0,
+    )
     assert cli.main(["doctor", "--home", str(tmp_path)]) == 0
     assert calls[0][1]["json_output"] is False and calls[0][1]["fields"] is None
     for action in ("set-key", "delete-key", "verify-key", "show"):
         assert cli.main(["settings", action, "--home", str(tmp_path)]) == 0
     assert [c[1] for c in calls[1:]] == ["set-key", "delete-key", "verify-key", "show"]
+    assert all(c[2] is None for c in calls[1:])
+    use = ["settings", "use-provider", "--provider", "gemini", "--home", str(tmp_path)]
+    assert cli.main(use) == 0
+    assert calls[-1][1:] == ("use-provider", "gemini")
     assert all(c[0].root == tmp_path for c in calls)
     with pytest.raises(SystemExit):
         parser().parse_args(["settings", "--home", str(tmp_path)])
@@ -810,3 +819,38 @@ def test_run_provider_requests_trust_the_remembered_ca_bundle(root, monkeypatch)
 
     assert main(arguments(root), factory=composed, output=lambda _: None) == 2
     assert seen == [bundle] and "SSL_CERT_FILE" not in os.environ
+
+
+def test_cli_attach_stores_pages_in_goal(root):
+    import io
+
+    from PIL import Image
+
+    keyed(root)
+    layout = root / "fictional-layout.png"
+    buffer = io.BytesIO()
+    Image.new("RGB", (20, 40), "white").save(buffer, "PNG")
+    layout.write_bytes(buffer.getvalue())
+    compose, _, calls, _ = factory(root, ["inconclusive"])
+    output = []
+    code = main([*arguments(root), "--attach", str(layout)], factory=compose, output=output.append)
+    assert code == 2
+    (listed,) = calls[0]["attachments"]
+    assert listed["name"] == "fictional-layout.png" and listed["page_count"] == 1
+
+
+def test_cli_attach_rejects_unsupported_file_before_running(root):
+    keyed(root)
+    bad = root / "notes.txt"
+    bad.write_text("fictional notes", encoding="utf-8")
+    ran = []
+    output = []
+
+    def compose(settings, key, control):
+        ran.append(1)
+        raise AssertionError("must not compose")
+
+    assert (
+        main([*arguments(root), "--attach", str(bad)], factory=compose, output=output.append) == 3
+    )
+    assert ran == [] and "PNG, JPG and PDF" in output[-1]

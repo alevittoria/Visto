@@ -6,14 +6,29 @@ import re
 import sqlite3
 from collections.abc import Awaitable, Callable
 from contextlib import closing
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
 from fastapi import HTTPException
 
-from visto.adapters.ai import AUDIO_EXTENSIONS, TRANSCRIPTION_MODEL, transcribe
+from visto.adapters.ai import (
+    AUDIO_EXTENSIONS,
+    DEFAULT_PROVIDER,
+    PROVIDERS,
+    TRANSCRIPTION_MODEL,
+    TRANSCRIPTION_PROVIDER,
+    Provider,
+    transcribe,
+)
+from visto.adapters.attachments import (
+    MAX_RUN_PAGES,
+    AttachmentError,
+    AttachmentStaging,
+    RenderedPage,
+    promote,
+)
 from visto.adapters.devices import AttachedDevice, InventoryUnavailable, Platform
 from visto.adapters.pricing import PriceSheet, SQLitePriceStore
 from visto.adapters.settings.store import SettingsError, SettingsStore
@@ -22,7 +37,7 @@ from visto.adapters.storage.codec import loads
 from visto.application.loop import RunLoop
 from visto.application.ports import PortError
 from visto.application.runtime import MutableRunControl, SystemClock
-from visto.domain.models import ArtifactRef, Goal, Observation, RunLimits
+from visto.domain.models import ArtifactRef, AttachmentPage, Goal, Observation, RunLimits
 from visto.domain.run import InfrastructureFailure, Run, RunState, UserAnswer
 from visto.runner import RunnerSettings, build_runtime, new_run
 
@@ -36,6 +51,13 @@ def kind(value: object) -> str:
 
 def public(value: object, *, observation_id: str | None = None) -> object:
     """Explicit artifact translation keeps private storage keys off the wire."""
+    if isinstance(value, AttachmentPage):
+        return {
+            "kind": "attachment_page",
+            **{f.name: getattr(value, f.name) for f in fields(value) if f.name != "image"},
+            "media_type": value.image.media_type,
+            "url": f"/api/runs/{value.image.run_id}/attachments/{value.attachment_id}",
+        }
     if isinstance(value, ArtifactRef):
         return {
             **{
@@ -66,9 +88,7 @@ class WebSettings:
     settings_store: SettingsStore
     lease_directory: Path
     appium_url: str = "http://127.0.0.1:4723"
-    model: str = "gpt-6-luna"
-    # Operator-selectable models (OpenAI docs, see docs/references.md); default first.
-    models: tuple[str, ...] = ("gpt-6-luna", "gpt-5.6-terra", "gpt-6-sol")
+    # Operator-selectable models come from the active provider (adapters/ai/providers).
     limits: RunLimits = RunLimits(1200000, 60, 90, 60000, 10000)
     # Passed to every iOS run (see RunnerSettings.ios_prepare); `visto start` sets it.
     ios_prepare: Callable[[str, float], object] | None = field(
@@ -121,6 +141,8 @@ class ExecutionService:
 
     async def open(self):
         self.artifacts = LocalArtifactStore(self.settings.data_directory / "artifacts")
+        self.staging = AttachmentStaging(self.settings.data_directory / "staging")
+        await asyncio.to_thread(self.staging.sweep)
         self.store = SQLiteRunStore(self.settings.data_directory / "runs.sqlite3", self.artifacts)
         try:
             self.prices = SQLitePriceStore(self.settings.data_directory / "prices.sqlite3")
@@ -166,11 +188,19 @@ class ExecutionService:
             p.value for p, on in ((Platform.ANDROID, self.device_lister), (Platform.IOS, ios)) if on
         ]
 
+    def active_provider(self) -> tuple[Provider, str]:
+        """The active provider and its key; invalid settings raise SettingsError."""
+        identifier, key = self.settings.settings_store.active()
+        return PROVIDERS[identifier], key
+
     def readiness(self):
         error = None
         key = ""
+        dictation_key = ""
+        provider = PROVIDERS[DEFAULT_PROVIDER]
         try:
-            key = self.settings.settings_store.api_key()
+            provider, key = self.active_provider()
+            dictation_key = self.settings.settings_store.api_key(TRANSCRIPTION_PROVIDER)
         except SettingsError:
             error = "Local settings are invalid; open Settings or check the Visto home"
         try:
@@ -178,17 +208,21 @@ class ExecutionService:
                 "configuration-check",
                 self.settings.data_directory,
                 appium_url=self.settings.appium_url,
-                model=self.settings.model,
+                model=provider.default_model,
+                provider=provider.id,
             )
         except (ValueError, OSError):
             error = "Server configuration is invalid; check local operator settings"
         configured = bool(key.strip()) and error is None
         return {
             "configured": configured,
+            "provider": provider.id,
+            "provider_label": provider.label,
             "provider_key_configured": bool(key.strip()),
+            "dictation_available": bool(dictation_key.strip()) and error is None,
             "configuration_error": error,
-            "model": self.settings.model,
-            "models": list(self.settings.models),
+            "model": provider.default_model,
+            "models": list(provider.models),
             "appium_url": self.settings.appium_url,
             "device_selection": "manual",
             "devices": [],
@@ -209,11 +243,14 @@ class ExecutionService:
         if not audio:
             raise HTTPException(422, "No audio was recorded")
         try:
-            key = self.settings.settings_store.api_key()
+            # Dictation uses its own provider's key, whichever provider runs the tests.
+            key = self.settings.settings_store.api_key(TRANSCRIPTION_PROVIDER)
         except SettingsError:
             key = ""
         if not key.strip():
-            raise HTTPException(503, "Provider configuration is missing or invalid on the server")
+            raise HTTPException(
+                503, "Dictation needs an OpenAI key; save one in Settings to use it"
+            )
         if self.transcribing:
             raise HTTPException(429, "Another recording is being transcribed")
         self.transcribing = True
@@ -361,11 +398,23 @@ class ExecutionService:
                 raise HTTPException(
                     409, "One execution is already retained; finish or cancel it first"
                 )
-            model = self.settings.model if request.model is None else request.model
-            if model not in self.settings.models:
+            try:
+                provider, key = self.active_provider()
+            except SettingsError:
+                raise HTTPException(
+                    503, "Provider configuration is missing or invalid on the server"
+                ) from None
+            model = provider.default_model if request.model is None else request.model
+            if model not in provider.models:
                 raise HTTPException(422, "Unsupported AI model")
             if request.platform is Platform.IOS and Platform.IOS.value not in self.platforms():
                 raise HTTPException(422, "Unsupported platform")
+            try:
+                files = [self.staging.get(upload_id) for upload_id in request.attachments]
+            except AttachmentError as error:
+                raise HTTPException(422, str(error)) from None
+            if sum(len(f.pages) for f in files) > MAX_RUN_PAGES:
+                raise HTTPException(422, f"A run can have at most {MAX_RUN_PAGES} attachment pages")
             readiness = self.readiness()
             if not readiness["configured"]:
                 raise HTTPException(
@@ -373,12 +422,12 @@ class ExecutionService:
                 )
             try:
                 stored = self.settings.settings_store
-                key = stored.api_key()
                 settings = RunnerSettings(
                     request.device_id,
                     self.settings.data_directory,
                     appium_url=self.settings.appium_url,
                     model=model,
+                    provider=provider.id,
                     limits=RunLimits(**request.limits.model_dump()),
                     lease_directory=self.settings.lease_directory,
                     platform=request.platform,
@@ -395,11 +444,71 @@ class ExecutionService:
                 )
             except (ValueError, OSError):  # SettingsError is a ValueError.
                 raise HTTPException(503, "Runtime configuration could not be initialized") from None
+            if files:
+                try:
+                    pages = await promote(files, run.run_id, self.artifacts)
+                except (AttachmentError, PortError):
+                    await self.artifacts.delete_run(run.run_id)
+                    raise HTTPException(422, "The attachments could not be stored") from None
+                run = replace(run, goal=replace(run.goal, attachments=pages))
             await self.store.create(run)
+            for staged in files:
+                self.staging.discard(staged.upload_id)
             entry = _Execution(run.run_id, runtime, control, asyncio.Event())
             self.active = entry
             entry.task = asyncio.create_task(self._worker(entry, run))
             return self.view(run)
+
+    async def upload_attachment(self, name: str, content: bytes) -> dict:
+        try:
+            staged = await asyncio.to_thread(self.staging.stage, name, content)
+        except AttachmentError as error:
+            raise HTTPException(422, str(error)) from None
+        return {"upload_id": staged.upload_id, "name": staged.name, "page_count": len(staged.pages)}
+
+    def discard_attachment(self, upload_id: str) -> None:
+        self.staging.discard(upload_id)
+
+    async def attachment_page(self, run_id: str, attachment_id: str) -> tuple[bytes, str]:
+        run = await self.get(run_id)
+        page = next((p for p in run.goal.attachments if p.attachment_id == attachment_id), None)
+        if page is None:
+            raise HTTPException(404, "Attachment not found in this run")
+        return await self.artifacts.read(page.image), page.image.media_type
+
+    async def stage_from_run(self, run_id: str) -> list[dict]:
+        """Stage a stored run's attachments again, one upload per original file, for a rerun."""
+        try:
+            run = await self.get(run_id)
+        except HTTPException:
+            raise HTTPException(404, "Run not found") from None
+        groups: dict[tuple[str, int], list[AttachmentPage]] = {}
+        order: list[tuple[str, int]] = []
+        for page in run.goal.attachments:
+            # A new file starts at its page 1; equal names stay separate files.
+            if page.page == 1 or not order or order[-1][0] != page.name:
+                order.append((page.name, len(order)))
+                groups[order[-1]] = []
+            groups[order[-1]].append(page)
+        if not order:
+            raise HTTPException(404, "This run has no attachments")
+        staged = []
+        try:
+            for key in order:
+                rendered = []
+                for page in groups[key]:
+                    content = await self.artifacts.read(page.image)
+                    rendered.append(
+                        RenderedPage(page.image.media_type, content, page.width, page.height)
+                    )
+                staged.append(self.staging.stage_pages(key[0], tuple(rendered)))
+        except (PortError, AttachmentError):
+            for item in staged:
+                self.staging.discard(item.upload_id)
+            raise HTTPException(404, "The attachments of this run are no longer readable") from None
+        return [
+            {"upload_id": s.upload_id, "name": s.name, "page_count": len(s.pages)} for s in staged
+        ]
 
     async def _worker(self, entry, run):
         try:

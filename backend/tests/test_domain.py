@@ -303,3 +303,108 @@ def test_technical_stops_can_terminate_suspended_question_without_ai_verdict(run
         assert not hasattr(stopped.terminal, "assessment")
     with pytest.raises(ValueError):
         replace(run, state=RunState.TERMINAL)
+
+
+def page(attachment_id="att-1", page_number=1, page_count=1):
+    from visto.domain.models import AttachmentPage
+
+    image = ArtifactRef(attachment_id + "-img", "run-1", "image/png", 3, "0" * 64, "key")
+    return AttachmentPage(
+        attachment_id, "fictional-layout.pdf", page_number, page_count, 80, 160, image
+    )
+
+
+def test_attachment_page_bounds():
+    page(page_number=2, page_count=2)
+    for number, count in ((0, 1), (3, 2)):
+        with pytest.raises(ValueError):
+            page(page_number=number, page_count=count)
+
+
+def test_goal_rejects_duplicate_or_too_many_attachments():
+    Goal("Compare", attachments=(page("a"), page("b")))
+    with pytest.raises(ValueError):
+        Goal("Compare", attachments=(page("a"), page("a")))
+    with pytest.raises(ValueError):
+        Goal("Compare", attachments=tuple(page(f"p{i}") for i in range(41)))
+
+
+def test_view_attachments_takes_one_to_four_unique_ids():
+    from visto.domain.models import ViewAttachments
+
+    ViewAttachments(("a", "b", "c", "d"))
+    for ids in ((), ("a", "a"), ("a", "b", "c", "d", "e")):
+        with pytest.raises(ValueError):
+            ViewAttachments(ids)
+
+
+def test_finding_needs_some_evidence():
+    from visto.domain.models import Finding
+
+    Finding("Share action missing", ("obs-1",), ("att-1",))
+    Finding("Layout never shown", (), ("att-1",))
+    with pytest.raises(ValueError):
+        Finding("Nothing cited", (), ())
+
+
+def attached_run(run):
+    return replace(run, goal=replace(run.goal, attachments=(page("att-1"), page("att-2"))))
+
+
+def test_decision_presenting_unknown_attachment_is_rejected(run, observation):
+    run = attached_run(run)
+    proposed = replace(decision(observation), presented_attachment_ids=("att-1",))
+    validate_decision(proposed, run, (observation,), "obs-1")
+    with pytest.raises(ValueError):
+        validate_decision(
+            replace(proposed, presented_attachment_ids=("att-9",)), run, (observation,), "obs-1"
+        )
+
+
+def test_view_attachments_of_unknown_id_is_rejected(run, observation):
+    from visto.domain.models import ViewAttachments
+
+    run = attached_run(run)
+    validate_decision(
+        decision(observation, ViewAttachments(("att-2",))), run, (observation,), "obs-1"
+    )
+    with pytest.raises(ValueError):
+        validate_decision(
+            decision(observation, ViewAttachments(("other-run-att",))), run, (observation,), "obs-1"
+        )
+
+
+def test_findings_may_cite_only_seen_attachments_and_presented_observations(run, observation):
+    from visto.domain.models import Finding
+
+    run = attached_run(run)
+
+    def concluding(*findings):
+        assessment = Assessment(
+            "run-1", "decision-1", SemanticVerdict.PASSED, "Matches", ("obs-1",), findings
+        )
+        return decision(observation, Conclude(assessment))
+
+    seen = frozenset({"att-1"})
+    ok = concluding(Finding("Share action missing", ("obs-1",), ("att-1",)))
+    validate_decision(ok, run, (observation,), "obs-1", seen_attachment_ids=seen)
+    shown_now = replace(
+        concluding(Finding("Order differs", ("obs-1",), ("att-2",))),
+        presented_attachment_ids=("att-2",),
+    )
+    validate_decision(shown_now, run, (observation,), "obs-1", seen_attachment_ids=seen)
+    earlier = concluding(Finding("Compared before", ("obs-0",), ("att-1",)))
+    validate_decision(
+        earlier,
+        run,
+        (observation,),
+        "obs-1",
+        seen_attachment_ids=seen,
+        seen_observation_ids=frozenset({"obs-0"}),
+    )
+    for invalid in (
+        concluding(Finding("Never shown", ("obs-1",), ("att-2",))),
+        concluding(Finding("Unpresented frame", ("obs-9",), ("att-1",))),
+    ):
+        with pytest.raises(ValueError):
+            validate_decision(invalid, run, (observation,), "obs-1", seen_attachment_ids=seen)

@@ -29,6 +29,6 @@ def test_health_reports_service_identity_without_claiming_runtime_readiness() ->
     assert response.headers["cache-control"] == "no-store"
     assert response.json() == {
         "product": "Visto",
-        "version": "0.3.0",
+        "version": "0.4.0",
         "runtime_ready": False,
     }

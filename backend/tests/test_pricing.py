@@ -35,6 +35,12 @@ DOCUMENT = {
             "pricing": {"inputPerM": True, "outputPerM": 1},
         },
         {"id": "other-1", "provider": "someone-else", "pricing": {"inputPerM": 1, "outputPerM": 2}},
+        {
+            "id": "fictional-a",
+            "provider": "anthropic",
+            "pricing": {"inputPerM": 2, "outputPerM": 9},
+        },
+        {"id": "fictional-g", "provider": "google", "pricing": {"inputPerM": 1, "outputPerM": 3}},
         "not a model",
     ],
 }
@@ -50,7 +56,10 @@ def directory():
 
 def test_parse_keeps_provider_models_with_numeric_base_rates():
     sheet = parse_prices(json.dumps(DOCUMENT).encode())
-    assert sheet == PriceSheet("2026-10-16T00:10:09.511Z", {"fictional-1": (0.1, 0.5)})
+    assert sheet == PriceSheet(
+        "2026-10-16T00:10:09.511Z",
+        {"fictional-1": (0.1, 0.5), "fictional-a": (2.0, 9.0), "fictional-g": (1.0, 3.0)},
+    )
     with pytest.raises(ValueError):
         parse_prices(b'{"models": []}')
     with pytest.raises(ValueError):
@@ -90,7 +99,7 @@ def test_refresh_fetches_once_per_utc_day_and_reports_failures(directory):
     store = SettingsStore(VistoHome(directory / "home"))
     store.set_api_key("dummy-key")
     service = ExecutionService(
-        WebSettings(directory, store, directory / "leases", models=("fictional-1",)),
+        WebSettings(directory, store, directory / "leases"),
     )
     calls = []
 
@@ -98,7 +107,7 @@ def test_refresh_fetches_once_per_utc_day_and_reports_failures(directory):
         calls.append(1)
         if len(calls) == 2:
             raise OSError("network down")
-        return PriceSheet(None, {"fictional-1": (0.1, 0.5), "fictional-9": (1, 1)})
+        return PriceSheet(None, {"gpt-6-luna": (0.1, 0.5), "fictional-9": (1, 1)})
 
     async def scenario():
         await service.open()  # No fetcher yet: no background task.
@@ -119,9 +128,9 @@ def test_refresh_fetches_once_per_utc_day_and_reports_failures(directory):
         body = client.get("/api/prices").json()
     assert body["source"] == "AI Pricing Guru"
     assert body["snapshot"]["day"] == "2026-10-17"
-    # Only operator-selectable models are listed.
+    # Only models some provider offers for selection are listed.
     assert body["models"] == {
-        "fictional-1": {"day": "2026-10-17", "input_per_m": 0.1, "output_per_m": 0.5}
+        "gpt-6-luna": {"day": "2026-10-17", "input_per_m": 0.1, "output_per_m": 0.5}
     }
 
 

@@ -75,3 +75,42 @@ def test_ios_capabilities_match_previous_mapping():
     assert caps["appium:xcodeSigningId"] == "Apple Development"
     assert caps["appium:updatedWDABundleId"] == "com.example.wda"
     assert IOSSigning().capabilities() == {}
+
+
+def test_existing_openai_only_files_stay_valid_and_keep_the_key(tmp_path):
+    # Files as written before providers were selectable: no provider field anywhere.
+    home = VistoHome(tmp_path)
+    home.settings_file.write_text('{"format": 1, "price_refresh": false}', encoding="utf-8")
+    home.secrets_file.write_text('{"format": 1, "openai_api_key": "sk-old-9876"}', encoding="utf-8")
+    store = SettingsStore(home)
+    assert store.load().provider == "openai" and store.load().price_refresh is False
+    assert store.active() == ("openai", "sk-old-9876")
+    assert store.key_status() == KeyStatus(True, "9876")
+
+
+def test_each_provider_keeps_its_own_key(tmp_path):
+    store = SettingsStore(VistoHome(tmp_path))
+    store.set_api_key("sk-openai-0001")
+    store.set_api_key("sk-ant-0002", "anthropic")
+    store.set_api_key("gem-0003", "gemini")
+    assert store.api_key() == "sk-openai-0001"
+    assert store.api_key("anthropic") == "sk-ant-0002"
+    assert store.delete_api_key("anthropic") == KeyStatus(False, None)
+    assert store.api_key("openai") == "sk-openai-0001" and store.api_key("gemini") == "gem-0003"
+    store.delete_api_key("openai")
+    store.delete_api_key("gemini")
+    assert not store._home.secrets_file.exists()
+
+
+def test_active_provider_round_trips_and_unknown_is_refused(tmp_path):
+    store = SettingsStore(VistoHome(tmp_path))
+    store.set_api_key("gem-0003", "gemini")
+    store.save(Settings(provider="gemini"))
+    assert store.active() == ("gemini", "gem-0003")
+    with pytest.raises(SettingsError):
+        store.save(Settings(provider="unknown"))
+    with pytest.raises(SettingsError):
+        store.set_api_key("k", "unknown")
+    store._home.settings_file.write_text('{"format": 1, "provider": "unknown"}', encoding="utf-8")
+    with pytest.raises(SettingsError, match="settings file is invalid"):
+        store.load()

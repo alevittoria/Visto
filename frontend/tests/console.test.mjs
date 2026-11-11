@@ -104,6 +104,10 @@ test('readiness parsing validates the contract and defaults new optional lists',
     device_selection: 'manual', devices: [], active_run_id: null, execution_available: true, default_limits: DEFAULT_LIMITS };
   assert.deepEqual(parseReadiness(ready).cleanup_attention_run_ids, []);
   assert.deepEqual(parseReadiness({ ...ready, cleanup_attention_run_ids: ['r9', 3] }).cleanup_attention_run_ids, ['r9']);
+  const parsed = parseReadiness(ready);
+  assert.deepEqual([parsed.provider, parsed.provider_label, parsed.dictation_available], [null, null, false]);
+  const named = parseReadiness({ ...ready, provider: 'anthropic', provider_label: 'Anthropic', dictation_available: true });
+  assert.deepEqual([named.provider, named.provider_label, named.dictation_available], ['anthropic', 'Anthropic', true]);
   for (const invalid of [null, [], { ...ready, configured: 'yes' }, { ...ready, default_limits: { ...DEFAULT_LIMITS, max_actions: '20' } }]) {
     assert.throws(() => parseReadiness(invalid), /Invalid readiness/);
   }
@@ -114,6 +118,8 @@ test('create block reasons are plain and ordered by what the operator must fix f
   assert.equal(createBlockReason(ready, true), null);
   assert.match(createBlockReason(ready, false), /not reachable/);
   assert.match(createBlockReason({ ...ready, configured: false, provider_key_configured: false }, true), /No AI provider key/);
+  assert.match(createBlockReason({ ...ready, configured: false, provider_key_configured: false, provider_label: 'Anthropic' }, true),
+    /No Anthropic key is saved/);
   assert.match(createBlockReason({ ...ready, configured: false, configuration_error: 'Bad settings' }, true), /Bad settings/);
   assert.match(createBlockReason({ ...ready, active_run_id: 'r1', execution_available: false }, true), /Another run/);
   assert.match(createBlockReason({ ...ready, execution_available: false }, true), /not accepting/);

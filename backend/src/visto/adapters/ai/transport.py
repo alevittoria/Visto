@@ -10,6 +10,8 @@ import sys
 
 from visto.application.ports import PortError
 
+from .providers import DEFAULT_PROVIDER, PROVIDERS, TRANSCRIPTION_PROVIDER
+
 MAX_REQUEST_BYTES = 24 * 1024 * 1024
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_INPUT_BYTES = MAX_REQUEST_BYTES * 2 + 65536
@@ -23,8 +25,12 @@ AUDIO_EXTENSIONS = {
     "audio/mpeg": "mp3",
     "audio/wav": "wav",
 }
-# Key check: GET /v1/models/{model} (docs/references.md); no billable inference.
+# Key check: each provider's fixed model-metadata GET (docs/references.md); no billable inference.
 PROBE_MODEL_PATTERN = r"[A-Za-z0-9._-]{1,128}"
+# Provider keys a parent environment may carry; the worker never inherits them.
+_KEY_VARIABLES = frozenset(
+    ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY")
+)
 SAFE_ERRORS = frozenset(
     "provider: " + code
     for code in (
@@ -78,10 +84,15 @@ async def _finish_cleanup(process: subprocess.Popen, communication: asyncio.Task
 
 
 async def request_response(
-    api_key: str, payload: bytes, timeout_ms: int, *, _spawn=subprocess.Popen
+    api_key: str,
+    payload: bytes,
+    timeout_ms: int,
+    *,
+    provider: str = DEFAULT_PROVIDER,
+    _spawn=subprocess.Popen,
 ) -> dict:
     """Run only the fixed worker; _spawn is a private local-test boundary."""
-    return await _exchange(api_key, payload, timeout_ms, {}, _spawn)
+    return await _exchange(api_key, payload, timeout_ms, {"provider": provider}, _spawn)
 
 
 async def request_transcription(
@@ -94,24 +105,44 @@ async def request_transcription(
         or len(audio) > MAX_AUDIO_BYTES
     ):
         raise PortError("provider: invalid_request")
-    return await _exchange(api_key, audio, timeout_ms, {"media_type": media_type}, _spawn)
+    return await _exchange(
+        api_key,
+        audio,
+        timeout_ms,
+        {"provider": TRANSCRIPTION_PROVIDER, "media_type": media_type},
+        _spawn,
+    )
 
 
 async def probe_model(
-    api_key: str, model: str, timeout_ms: int, *, _spawn=subprocess.Popen
+    api_key: str,
+    model: str,
+    timeout_ms: int,
+    *,
+    provider: str = DEFAULT_PROVIDER,
+    _spawn=subprocess.Popen,
 ) -> dict:
     """Retrieve one model's metadata through the fixed worker to check the key."""
     if type(model) is not str or re.fullmatch(PROBE_MODEL_PATTERN, model) is None:
         raise PortError("provider: invalid_request")
-    return await _exchange(api_key, None, timeout_ms, {"probe_model": model}, _spawn)
+    return await _exchange(
+        api_key, None, timeout_ms, {"provider": provider, "probe_model": model}, _spawn
+    )
 
 
-async def verify_key(api_key: str, model: str, timeout_ms: int, *, probe=probe_model) -> str:
+async def verify_key(
+    api_key: str,
+    model: str,
+    timeout_ms: int,
+    *,
+    provider: str = DEFAULT_PROVIDER,
+    probe=probe_model,
+) -> str:
     """Map a key probe to one word: ok, missing, unauthorized, model_unavailable, unreachable."""
     if not api_key.strip():
         return "missing"
     try:
-        await probe(api_key, model, timeout_ms)
+        await probe(api_key, model, timeout_ms, provider=provider)
     except PortError as error:
         code = str(error)
         if code in ("provider: http_401", "provider: http_403"):
@@ -134,6 +165,7 @@ async def _exchange(api_key, payload, timeout_ms, extra: dict, _spawn) -> dict:
         )
         or type(timeout_ms) is not int
         or timeout_ms < 1
+        or extra.get("provider") not in PROVIDERS
     ):
         raise PortError("provider: invalid_request")
     deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
@@ -146,7 +178,7 @@ async def _exchange(api_key, payload, timeout_ms, extra: dict, _spawn) -> dict:
     try:
         # Synchronous OS creation gives us the handle before cancellation can
         # occur. Startup counts against the deadline; no stdin is sent if it has
-        # already expired. Remove the inherited provider key while preserving
+        # already expired. Remove inherited provider keys while preserving
         # normal proxy/TLS settings. This request's key travels only over stdin.
         process = _spawn(
             [sys.executable, "-m", "visto.adapters.ai.http_worker"],
@@ -154,7 +186,7 @@ async def _exchange(api_key, payload, timeout_ms, extra: dict, _spawn) -> dict:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             env={
-                key: value for key, value in os.environ.items() if key.upper() != "OPENAI_API_KEY"
+                key: value for key, value in os.environ.items() if key.upper() not in _KEY_VARIABLES
             },
             **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
         )

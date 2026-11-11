@@ -4,7 +4,14 @@ import hashlib
 from dataclasses import dataclass, field
 
 from visto.domain._validation import instance, items, text
-from visto.domain.models import Action, AgentDecision, Observation, TechnicalReceipt
+from visto.domain.models import (
+    MAX_VIEWED_ATTACHMENTS,
+    Action,
+    AgentDecision,
+    AttachmentPage,
+    Observation,
+    TechnicalReceipt,
+)
 from visto.domain.run import Run, UserAnswer
 from visto.domain.validation import validate_observations
 
@@ -26,6 +33,22 @@ class PresentedImage:
 
 
 @dataclass(frozen=True, slots=True)
+class PresentedAttachment:
+    page: AttachmentPage
+    content: bytes = field(repr=False)
+
+    def __post_init__(self) -> None:
+        instance(self.page, AttachmentPage)
+        artifact = self.page.image
+        if (
+            type(self.content) is not bytes
+            or len(self.content) != artifact.byte_length
+            or hashlib.sha256(self.content).hexdigest() != artifact.sha256
+        ):
+            raise ValueError("Presented attachment differs from stored artifact")
+
+
+@dataclass(frozen=True, slots=True)
 class AgentContext:
     run: Run
     images: tuple[PresentedImage, ...]
@@ -36,9 +59,20 @@ class AgentContext:
     recent_decisions: tuple[AgentDecision, ...] = ()
     answers: tuple[UserAnswer, ...] = ()
     conversation_id: str | None = None
+    # Pages the previous decision asked to view; shown this turn only.
+    attachments: tuple[PresentedAttachment, ...] = ()
+    # Attachment pages and observations presented in earlier turns of this run.
+    seen_attachment_ids: frozenset[str] = frozenset()
+    seen_observation_ids: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         instance(self.run, Run)
+        items(self.attachments, PresentedAttachment)
+        if (
+            len(self.attachments) > MAX_VIEWED_ATTACHMENTS
+            or not {a.page.attachment_id for a in self.attachments} <= self.run.goal.attachment_ids
+        ):
+            raise ValueError("Presented attachments are not this run's")
         items(self.images, PresentedImage, nonempty=True)
         text(self.current_observation_id)
         text(self.working_plan, allow_empty=True)

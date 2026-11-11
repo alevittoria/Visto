@@ -338,3 +338,43 @@ def test_post_action_decision_requires_receipt_and_fresh_capture(tmp_path, mode)
             assert (await store.get(run.run_id)).terminal is None
 
     asyncio.run(scenario())
+
+
+def test_records_written_before_attachments_still_load():
+    import json
+
+    from visto.adapters.storage.codec import dumps, loads
+
+    assessment = Assessment("run-1", "decision-1", SemanticVerdict.PASSED, "done", ("obs-1",))
+    decision = AgentDecision(
+        "decision-1",
+        "run-1",
+        "obs-1",
+        ("obs-1",),
+        Conclude(assessment),
+        "go",
+        "plan",
+        ModelIdentity("provider", "model", "prompt-v1"),
+    )
+    added = {"attachments", "findings", "presented_attachment_ids"}
+
+    def strip(node):
+        if isinstance(node, dict):
+            fields = node.get("fields")
+            if isinstance(fields, dict):
+                for name in added & set(fields):
+                    del fields[name]
+            for value in node.values():
+                strip(value)
+        elif isinstance(node, list):
+            for value in node:
+                strip(value)
+
+    for value in (initial(), decision):
+        data = json.loads(dumps(value))
+        strip(data)
+        assert loads(json.dumps(data)) == value
+    extra = json.loads(dumps(initial()))
+    extra["value"]["fields"]["goal"]["fields"]["unknown"] = None
+    with pytest.raises(ValueError):
+        loads(json.dumps(extra))

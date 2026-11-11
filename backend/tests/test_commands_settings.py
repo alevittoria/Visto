@@ -64,7 +64,7 @@ def test_verify_key_prints_result_word(tmp_path, outcome, word, code):
     SettingsStore(home).set_api_key("sk-test-verify1")
     seen = []
 
-    async def probe(key, model, timeout_ms):
+    async def probe(key, model, timeout_ms, provider):
         seen.append((key, model, timeout_ms))
         if outcome is not None:
             raise PortError(outcome)
@@ -77,7 +77,7 @@ def test_verify_key_prints_result_word(tmp_path, outcome, word, code):
 
 
 def test_verify_without_key_makes_no_probe(tmp_path):
-    async def probe(*args):
+    async def probe(*args, **kwargs):
         pytest.fail("no probe without a key")
 
     lines = []
@@ -104,7 +104,7 @@ def test_show_on_mac_prints_presence_flags_only(tmp_path):
     lines = []
     assert run_settings(home, "show", output=lines.append, host="macos-arm64") == 0
     text = "\n".join(lines)
-    assert "Provider key: not configured" in text
+    assert "OpenAI key: not configured" in text
     assert "iOS team ID: set" in text and "iOS signing ID: not set" in text
     assert "TEAM-SECRET-1" not in text and "example.bundle.secret" not in text
 
@@ -128,9 +128,39 @@ def test_verify_key_trusts_the_remembered_ca_bundle(tmp_path, monkeypatch):
     Toolchain(home).save_state(ToolchainState(ca_bundle=str(tmp_path / "corp.pem")))
     seen = []
 
-    async def probe(key, model, timeout_ms):
+    async def probe(key, model, timeout_ms, provider):
         seen.append(os.environ.get("SSL_CERT_FILE"))
         return {"id": model}
 
     assert run_settings(home, "verify-key", output=lambda _: None, probe=probe) == 0
     assert seen == [str(tmp_path / "corp.pem")] and "SSL_CERT_FILE" not in os.environ
+
+
+def test_use_provider_switches_without_touching_keys(tmp_path):
+    home = VistoHome(tmp_path)
+    store = SettingsStore(home)
+    store.set_api_key("sk-openai-0001")
+    lines = []
+    assert run_settings(home, "use-provider", output=lines.append) == 2
+    assert run_settings(home, "use-provider", provider="anthropic", output=lines.append) == 0
+    assert lines[-2:] == ["AI provider: Anthropic", "Anthropic key: not configured"]
+    stdin = io.StringIO("sk-ant-0002\n")
+    assert run_settings(home, "set-key", stdin=stdin, output=lines.append) == 0
+    assert store.active() == ("anthropic", "sk-ant-0002")
+    assert store.api_key("openai") == "sk-openai-0001"
+    run_settings(home, "show", output=lines.append, host="windows-x64")
+    assert "OpenAI key: configured (ends with 0001)" in lines
+    assert "sk-ant-0002" not in "\n".join(lines)
+
+
+def test_verify_key_uses_the_named_provider(tmp_path):
+    home = VistoHome(tmp_path)
+    SettingsStore(home).set_api_key("gem-0003", "gemini")
+    seen = []
+
+    async def probe(key, model, timeout_ms, provider):
+        seen.append((key, model, provider))
+        return {}
+
+    code = run_settings(home, "verify-key", provider="gemini", output=lambda _: None, probe=probe)
+    assert code == 0 and seen == [("gem-0003", "gemini-4-argon", "gemini")]

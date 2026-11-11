@@ -94,7 +94,7 @@ You need:
 
 - [uv](https://docs.astral.sh/uv/getting-started/installation/), the only tool you
   install by hand (it also provides Python);
-- an OpenAI API key with access to a vision model;
+- an API key for one AI provider: OpenAI, Anthropic or Google Gemini;
 - an Android 8+ device with USB debugging enabled, connected and authorized.
 
 Copy the wheel URL of the release you want from the
@@ -112,7 +112,7 @@ the Android SDK license and installs its toolchain into `~/.visto`; later starts
 reuse it. Visto installs nothing system-wide and changes no environment variable;
 Android Studio is not needed. `start` runs Appium and opens the console at
 <http://127.0.0.1:8000/>. While no provider key is configured, the console opens on
-its Settings page: paste the API key there, then pick your device, describe the
+its Settings page: choose the AI provider and paste its API key there, then pick your device, describe the
 goal and start the run. `visto doctor` checks the setup when something does not
 work.
 
@@ -236,7 +236,8 @@ More: [architecture](docs/ai-context/03-architecture.md) ·
 - [x] Voice dictation, run statistics and cost estimates
 - [x] iOS device adapter (Appium/XCUITest)
 - [x] iOS verified against real devices
-- [ ] Additional AI providers (only OpenAI is wired today)
+- [x] OpenAI, Anthropic and Google Gemini providers (Anthropic and Gemini not yet run live)
+- [x] Attached reference files (PNG, JPG, PDF), for example layouts the AI compares with each screen (not yet run live)
 - [ ] Labelled evaluation suite to measure judgement quality across models
 - [ ] CI-friendly headless mode and exit codes for pipelines
 - [ ] Optional accessibility-tree observations (as extra data, never as a verifier)

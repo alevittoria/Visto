@@ -12,8 +12,8 @@
 | Toolchain | Portable Node, Temurin JDK, Android platform-tools/build-tools | `backend/src/visto/toolchain/components.json` pins URL and checksum per host; `visto setup` installs into the Visto home |
 | Android | Appium 3 / UiAutomator2, adb | `tools/appium` lock installed by `visto setup` with the managed Node, SDK and JDK; stdlib REST adapter |
 | iOS | Appium 3 / XCUITest driver, Xcode `xcrun` | `tools/appium/macos` lock (Android and iOS drivers), macOS only; stdlib REST adapter |
-| Settings | JSON files in the Visto home | `settings.json` and `secrets.json` (provider key, plain text, owner-only on POSIX) |
-| AI | OpenAI Responses API, Pillow | Versioned instructions in `backend/prompts/`; stdlib HTTPS in a fixed child process, no SDK; Pillow downscales screenshots to the provider's image limits |
+| Settings | JSON files in the Visto home | `settings.json` and `secrets.json` (one key per AI provider, plain text, owner-only on POSIX) |
+| AI | OpenAI Responses, Anthropic Messages, Gemini Interactions APIs; Pillow | One active provider (`adapters/ai/providers.py`); versioned instructions in `backend/prompts/`; stdlib HTTPS in a fixed child process, no SDK; Pillow downscales screenshots to the provider's image limits |
 | Companion checks | Python 3.12+ standard library | No package install required |
 
 Exact versions are in the lockfiles; do not duplicate them in docs. Domain and

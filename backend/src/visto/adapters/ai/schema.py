@@ -12,9 +12,11 @@ from visto.domain.models import (
     Conclude,
     EffectAssessment,
     EffectVerdict,
+    Finding,
     ModelUsage,
     ObserveAfter,
     SemanticVerdict,
+    ViewAttachments,
 )
 from visto.domain.validation import validate_decision
 
@@ -31,6 +33,7 @@ def obj(**properties):
 STRING = {"type": "string", "maxLength": 8000}
 INTEGER = {"type": "integer", "minimum": 0, "maximum": 3600000}
 EVIDENCE = {"type": "array", "items": STRING, "minItems": 1, "maxItems": 8}
+CITATIONS = {"type": "array", "items": STRING, "minItems": 0, "maxItems": 8}
 
 
 def enum(*values):
@@ -75,10 +78,22 @@ SCHEMA = obj(
             obj(kind=enum("observe_after"), delay_ms=INTEGER),
             obj(kind=enum("ask_user"), question=STRING),
             obj(
+                kind=enum("view_attachments"),
+                attachment_ids={"type": "array", "items": STRING, "minItems": 1, "maxItems": 4},
+            ),
+            obj(
                 kind=enum("conclude"),
                 verdict=enum("passed", "failed", "inconclusive"),
                 explanation=STRING,
                 observation_ids=EVIDENCE,
+                findings={
+                    "type": "array",
+                    "items": obj(
+                        explanation=STRING, observation_ids=CITATIONS, attachment_ids=CITATIONS
+                    ),
+                    "minItems": 0,
+                    "maxItems": 20,
+                },
             ),
         ]
     },
@@ -133,6 +148,8 @@ def decode_decision(
             choice = ObserveAfter(nxt["delay_ms"])
         case "ask_user":
             choice = AskUser(nxt["question"])
+        case "view_attachments":
+            choice = ViewAttachments(tuple(nxt["attachment_ids"]))
         case "conclude":
             choice = Conclude(
                 Assessment(
@@ -141,6 +158,14 @@ def decode_decision(
                     SemanticVerdict(nxt["verdict"]),
                     nxt["explanation"],
                     tuple(nxt["observation_ids"]),
+                    tuple(
+                        Finding(
+                            item["explanation"],
+                            tuple(item["observation_ids"]),
+                            tuple(item["attachment_ids"]),
+                        )
+                        for item in nxt["findings"]
+                    ),
                 )
             )
     effect = payload["previous_effect"]
@@ -162,6 +187,7 @@ def decode_decision(
         context.run.configuration.identity,
         usage,
         effect,
+        tuple(a.page.attachment_id for a in context.attachments),
     )
     validate_decision(
         decision,
@@ -169,5 +195,27 @@ def decode_decision(
         tuple(i.observation for i in context.images),
         context.current_observation_id,
         context.previous_action,
+        context.seen_attachment_ids,
+        context.seen_observation_ids,
     )
     return decision
+
+
+def without_keywords(schema, keywords: frozenset[str]):
+    """A copy of the schema without the named constraint keywords.
+
+    Some providers reject bounds such as `maxLength`; the full schema is still
+    enforced locally by `check_schema` on every decoded decision.
+    """
+    if isinstance(schema, dict):
+        result = {}
+        for key, value in schema.items():
+            if key == "properties":
+                # Property names are data, never keywords.
+                result[key] = {name: without_keywords(v, keywords) for name, v in value.items()}
+            elif key not in keywords:
+                result[key] = without_keywords(value, keywords)
+        return result
+    if isinstance(schema, list):
+        return [without_keywords(item, keywords) for item in schema]
+    return schema

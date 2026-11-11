@@ -6,15 +6,17 @@ application boundary. See [architecture](03-architecture.md).
 
 | Value | Minimum fields and meaning |
 |---|---|
-| Goal | Exact original prompt text, optional expected result and immutable constraint tuple; kept separate from the working plan |
+| Goal | Exact original prompt text, optional expected result, immutable constraint tuple and attachment pages; kept separate from the working plan |
+| AttachmentPage | `attachment_id`, original file name, page number and page count, pixel size and the owned image artifact; at most 40 per run; observation data, never instructions |
 | Run | `run_id`, `device_id`, immutable Goal and configuration snapshot, lifecycle state, revision, timestamps, pending question and terminal record |
 | Run configuration | Technical limits, tool capabilities, instruction version, provider/model identity, adapter versions; no credentials |
 | Observation | `observation_id`, `run_id`, sequence, capture time, screenshot artifact reference, image dimensions/orientation, device/session identity, optional technical metadata |
 | Action | `action_id`, `run_id`, source `decision_id` and `observation_id`, typed command and arguments, bounded timeout |
 | TechnicalReceipt | `action_id`, dispatch/start/end times, status (`completed`, `rejected`, `error`, `uncertain`), sanitized error/details |
-| AgentDecision | `decision_id`, `run_id`, input observation/evidence IDs, previous-effect assessment, concise rationale, updated working plan, one typed next decision, usage/model metadata |
+| AgentDecision | `decision_id`, `run_id`, input observation/evidence IDs and presented attachment page IDs, previous-effect assessment, concise rationale, updated working plan, one typed next decision, usage/model metadata |
 | Effect assessment | Previous `action_id` if any, AI judgement (`achieved`, `not_achieved`, `unclear`), explanation and evidence IDs; optional on initial turn |
-| Assessment | AI verdict (`passed`, `failed`, `inconclusive`), concise explanation, referenced observation IDs, associated `decision_id` |
+| Assessment | AI verdict (`passed`, `failed`, `inconclusive`), concise explanation, referenced observation IDs, associated `decision_id`, findings |
+| Finding | Explanation with the observation and attachment page IDs it compares; a note beside the verdict, never a verdict itself |
 | PendingQuestion | `question_id`, `run_id`, source `decision_id`, question text, creation time, answered/cancelled state and attributed answer when supplied |
 | Artifact reference | Artifact ID, media type, byte length, content hash, storage key; portable reference rather than public path/URL |
 
@@ -30,7 +32,11 @@ define a provider or future run API schema. Inner layers import standard library
 and inward packages only; the import guard tests relative imports too.
 
 `AgentDecision.next` is a discriminated union: `act(command)`,
-`observe_after(delay_ms)`, `ask_user(question)` or `conclude(Assessment)`. This is
+`observe_after(delay_ms)`, `ask_user(question)`, `view_attachments(ids)` or
+`conclude(Assessment)`. `view_attachments` names one to four of the run's
+attachment pages; the next turn presents them beside a fresh observation and runs
+no device command. A finding may cite only attachment pages and observations
+presented in this or an earlier turn. This is
 a technical tool protocol, not a taxonomy of semantic test steps. `ask_user`
 records one pending question and transitions to `waiting_for_user` without device
 actions. An answer is appended as user-attributed clarification, preserving the

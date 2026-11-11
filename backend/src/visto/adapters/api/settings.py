@@ -1,13 +1,18 @@
-"""Settings routes: console-editable options and the write-only provider key."""
+"""Settings routes: console-editable options, the active AI provider and write-only keys.
+
+Each provider keeps its own key. Key routes act on the provider named in the
+request, or on the active provider when none is named.
+"""
 
 import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from visto.adapters.ai.providers import PROVIDERS
 from visto.adapters.ai.transport import probe_model
 from visto.adapters.ai.transport import verify_key as key_verdict
 from visto.adapters.ios.signing import IOSSigning
@@ -27,7 +32,8 @@ class SettingsRoutesConfig:
     ios_supported: bool = sys.platform == "darwin"
     wda_project: Callable[[], Path | None] = lambda: None
     xcuitest_version: Callable[[], str | None] = lambda: None
-    prober: Callable[[str, str, int], Awaitable[dict]] = field(default=probe_model)
+    # Called as prober(key, model, timeout_ms, provider=...).
+    prober: Callable[..., Awaitable[dict]] = field(default=probe_model)
 
 
 class IOSBody(BaseModel):
@@ -43,11 +49,14 @@ class SettingsBody(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     price_refresh: bool
     ios: IOSBody | None = None
+    # None keeps the active provider.
+    provider: str | None = Field(default=None, max_length=32)
 
 
 class KeyBody(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     api_key: str = Field(max_length=8192)
+    provider: str | None = Field(default=None, max_length=32)
 
 
 def _config(request: Request) -> SettingsRoutesConfig:
@@ -69,12 +78,24 @@ def _key_view(status: KeyStatus) -> dict:
     return {"configured": status.configured, "last4": status.last4, "storage": KEY_STORAGE}
 
 
+def _provider(request: Request, requested: str | None) -> str:
+    """The named provider, else the active one; unknown names are a client error."""
+    if requested is None:
+        try:
+            return _store(request).load().provider
+        except SettingsError:
+            raise _invalid() from None
+    if requested not in PROVIDERS:
+        raise HTTPException(422, "Unsupported AI provider")
+    return requested
+
+
 def _view(request: Request) -> dict:
     config = _config(request)
     try:
         store = _store(request)
         settings = store.load()
-        key = store.key_status()
+        keys = {identifier: store.key_status(identifier) for identifier in PROVIDERS}
     except SettingsError:
         raise _invalid() from None
     supported = config.ios_supported
@@ -83,6 +104,17 @@ def _view(request: Request) -> dict:
     ios = settings.ios
     return {
         "price_refresh": settings.price_refresh,
+        "provider": settings.provider,
+        "providers": [
+            {
+                "id": entry.id,
+                "label": entry.label,
+                "default_model": entry.default_model,
+                "models": list(entry.models),
+                "key": _key_view(keys[entry.id]),
+            }
+            for entry in PROVIDERS.values()
+        ],
         "ios_supported": supported,
         "ios": {
             "team_id": ios.team_id,
@@ -93,7 +125,8 @@ def _view(request: Request) -> dict:
         }
         if supported
         else None,
-        "key": _key_view(key),
+        # The active provider's key.
+        "key": _key_view(keys[settings.provider]),
         "wda_project": str(project) if project is not None else None,
         "wda_rebuild_needed": bool(
             supported
@@ -115,16 +148,20 @@ async def write_settings(request: Request, body: SettingsBody) -> dict:
     config = _config(request)
     if body.ios is not None and not config.ios_supported:
         raise HTTPException(422, "iOS settings are not available on this host")
+    provider = _provider(request, body.provider)
     store = _store(request)
     try:
         current = store.load()
         if body.ios is None:
-            settings = Settings(body.price_refresh, current.ios, current.ios_saved_for_xcuitest)
+            settings = Settings(
+                body.price_refresh, current.ios, current.ios_saved_for_xcuitest, provider
+            )
         else:
             settings = Settings(
                 body.price_refresh,
                 IOSSigning(**body.ios.model_dump()),
                 config.xcuitest_version(),
+                provider,
             )
         store.save(settings)
     except (SettingsError, OSError):
@@ -135,8 +172,9 @@ async def write_settings(request: Request, body: SettingsBody) -> dict:
 @router.put("/settings/key")
 async def write_key(request: Request, body: KeyBody) -> dict:
     require_local_write(request)
+    provider = _provider(request, body.provider)
     try:
-        return _key_view(_store(request).set_api_key(body.api_key))
+        return _key_view(_store(request).set_api_key(body.api_key, provider))
     except SettingsError as error:
         # Key-validation messages never contain the value; file errors are generic.
         if str(error).startswith("the API key"):
@@ -147,24 +185,33 @@ async def write_key(request: Request, body: KeyBody) -> dict:
 
 
 @router.delete("/settings/key")
-async def delete_key(request: Request) -> dict:
+async def delete_key(
+    request: Request, provider: str | None = Query(default=None, max_length=32)
+) -> dict:
     require_local_write(request)
+    provider = _provider(request, provider)
     try:
-        return _key_view(_store(request).delete_api_key())
+        return _key_view(_store(request).delete_api_key(provider))
     except (SettingsError, OSError):
         raise _invalid() from None
 
 
 @router.post("/settings/key/verify")
-async def verify_key(request: Request) -> dict:
-    """Non-billable check: retrieve the default model's metadata with the stored key."""
+async def verify_key(
+    request: Request, provider: str | None = Query(default=None, max_length=32)
+) -> dict:
+    """Non-billable check: retrieve the provider's default model metadata with its key."""
     require_local_write(request)
-    execution = service(request)
+    provider = _provider(request, provider)
     try:
-        key = _store(request).api_key()
+        key = _store(request).api_key(provider)
     except SettingsError:
         raise _invalid() from None
     result = await key_verdict(
-        key, execution.settings.model, PROBE_TIMEOUT_MS, probe=_config(request).prober
+        key,
+        PROVIDERS[provider].default_model,
+        PROBE_TIMEOUT_MS,
+        provider=provider,
+        probe=_config(request).prober,
     )
     return {"result": result}

@@ -123,19 +123,24 @@ that is not yet accepted still prompts. It then prepares the run database (see
 [upgrade](#upgrade)). Only one `start` runs per home; a second one reports that
 Visto is already running and exits with code 4.
 
-## 4. Enter the provider key
+## 4. Choose the AI provider and enter its key
 
-On first open without a key, the console shows its **Settings** page. Paste the
-OpenAI API key there, save it and press **Verify**; see
-[provider setup](provider-setup.md) for what the key needs and how it is stored.
-On a host without a browser, use the terminal instead:
+On first open without a key, the console shows its **Settings** page. Pick the AI
+provider (OpenAI, Anthropic or Google Gemini; OpenAI is preselected), paste that
+provider's API key, save it and press **Verify**; see
+[provider setup](provider-setup.md) for what a key needs and how it is stored. Each
+provider keeps its own key, so switching provider later keeps the keys already
+saved. On a host without a browser, use the terminal instead:
 
 ```sh
+visto settings use-provider --provider anthropic   # openai, anthropic or gemini
 visto settings set-key       # reads one line: hidden prompt on a terminal, else stdin
 visto settings verify-key    # ok, missing, unauthorized, model_unavailable or unreachable
-visto settings show          # key status (last four characters only) and preferences
+visto settings show          # active provider, key status (last four only), preferences
 visto settings delete-key
 ```
+
+Key actions apply to the active provider, or to the one named with `--provider`.
 
 The key is never a command-line argument and is never printed. Changes apply to the
 next run without restarting Visto. On a Mac, the iOS signing values are entered on

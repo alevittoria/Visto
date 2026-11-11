@@ -17,7 +17,12 @@ export const DEFAULT_LIMITS: Limits = {
 
 export interface Readiness {
   configured: boolean;
+  /** The active AI provider; runs use it and its stored key. */
+  provider: string | null;
+  provider_label: string | null;
   provider_key_configured: boolean;
+  /** Dictation has its own provider key, independent of the active provider. */
+  dictation_available: boolean;
   configuration_error: string | null;
   model: string | null;
   /** Operator-selectable AI models; the server rejects anything else. */
@@ -39,6 +44,13 @@ export type EffectVerdict = 'achieved' | 'not_achieved' | 'unclear';
 export type ReceiptStatus = 'completed' | 'rejected' | 'error' | 'uncertain';
 export type RunState = 'created' | 'running' | 'paused' | 'waiting_for_user' | 'terminal';
 
+/** A difference or note the AI reported with its conclusion, citing screens and attachment pages. */
+export interface Finding {
+  explanation: string;
+  observation_ids: string[];
+  attachment_ids: string[];
+}
+
 export interface Assessment {
   kind?: 'assessment';
   run_id?: string;
@@ -46,6 +58,20 @@ export interface Assessment {
   verdict: SemanticVerdict;
   explanation: string;
   observation_ids: string[];
+  /** Absent on runs recorded before attachments existed. */
+  findings?: Finding[];
+}
+
+/** One page of a file attached to a run; `url` serves its image. */
+export interface AttachmentPage {
+  attachment_id: string;
+  name: string;
+  page: number;
+  page_count: number;
+  width: number;
+  height: number;
+  media_type: string;
+  url: string;
 }
 
 export interface EffectAssessment {
@@ -69,6 +95,7 @@ export type NextDecision =
   | { kind: 'act'; command: DeviceCommand; timeout_ms: number }
   | { kind: 'observe_after'; delay_ms: number }
   | { kind: 'ask_user'; question: string }
+  | { kind: 'view_attachments'; attachment_ids: string[] }
   | { kind: 'conclude'; assessment: Assessment };
 
 export interface UserAnswer {
@@ -101,7 +128,7 @@ export type TerminalRecord =
 export interface Run {
   run_id: string;
   device_id: string;
-  goal: { text: string; expected_result: string | null; constraints: string[] };
+  goal: { text: string; expected_result: string | null; constraints: string[]; attachments?: AttachmentPage[] };
   configuration: { limits: Limits; capabilities: string[]; identity: { provider: string; model: string; instruction_version: string };
     device_adapter_version: string };
   created_at: string;
@@ -197,7 +224,8 @@ export interface RunEvent {
 
 export interface RunPage { runs: Run[]; limit: number; offset: number }
 export interface Snapshot { run: Run | null; events: RunEvent[]; connected: boolean; error: string | null; checkedAt: number | null }
-interface ApiOptions { method?: 'GET' | 'POST' | 'PUT' | 'DELETE'; body?: unknown; audio?: Blob; signal?: AbortSignal; timeoutMs?: number }
+/** `audio` and `file` are sent as the raw request body with their own type. */
+interface ApiOptions { method?: 'GET' | 'POST' | 'PUT' | 'DELETE'; body?: unknown; audio?: Blob; file?: Blob; signal?: AbortSignal; timeoutMs?: number }
 export type Fetcher = (url: string, options: RequestInit) => Promise<Response>;
 export type Requester = <T>(path: string, options?: ApiOptions) => Promise<T>;
 
@@ -229,12 +257,15 @@ export async function apiRequest<T>(path: string, options: ApiOptions = {}, fetc
   if (options.signal?.aborted) controller.abort();
   const timer = setTimeout(abort, options.timeoutMs ?? 10000);
   const method = options.method ?? 'GET';
+  const raw = options.audio ?? options.file;
   try {
     let response: Response;
     try { response = await fetcher(`/api${path}`, {
       method, cache: 'no-store', signal: controller.signal,
-      headers: method !== 'GET' ? { 'Content-Type': options.audio?.type ?? 'application/json', 'X-Visto': 'local-console' } : undefined,
-      body: options.audio ?? (options.body === undefined ? undefined : JSON.stringify(options.body)),
+      headers: method !== 'GET'
+        ? { 'Content-Type': raw ? raw.type || 'application/octet-stream' : 'application/json', 'X-Visto': 'local-console' }
+        : undefined,
+      body: raw ?? (options.body === undefined ? undefined : JSON.stringify(options.body)),
     }); } catch { throw new ApiError(LOST, null, true); }
     let value: unknown;
     try { value = await response.json(); } catch { throw new ApiError(`Invalid service response (HTTP ${response.status})`, response.status, true); }
@@ -351,7 +382,9 @@ export function parseReadiness(value: unknown): Readiness {
   if (models.length === 0 && typeof v.model === 'string') models.push(v.model);
   const platforms = Array.isArray(v.platforms)
     ? v.platforms.filter((p): p is Platform => typeof p === 'string' && Object.hasOwn(PLATFORM_NAMES, p)) : [];
-  return { ...v, models, platforms, device_selection: 'manual', devices: Array.isArray(v.devices) ? v.devices : [], cleanup_attention_run_ids: attention } as Readiness;
+  const text = (x: unknown) => (typeof x === 'string' ? x : null);
+  return { ...v, models, platforms, provider: text(v.provider), provider_label: text(v.provider_label),
+    dictation_available: v.dictation_available === true, device_selection: 'manual', devices: Array.isArray(v.devices) ? v.devices : [], cleanup_attention_run_ids: attention } as Readiness;
 }
 
 /** Keep a still-offered model choice; otherwise use the server default. */
@@ -372,7 +405,9 @@ export function canCreateRun(readiness: Readiness | null, connected: boolean): b
 /** Plain-language reason a new run cannot start, or null when it can. */
 export function createBlockReason(readiness: Readiness | null, connected: boolean): string | null {
   if (!connected || !readiness) return 'The local service is not reachable. Start it, then check again.';
-  if (!readiness.provider_key_configured) return 'No AI provider key is configured on the server.';
+  if (!readiness.provider_key_configured) {
+    return `No ${readiness.provider_label ?? 'AI provider'} key is saved. Add one in Settings or choose another provider.`;
+  }
   if (!readiness.configured) return readiness.configuration_error ?? 'Server configuration is incomplete.';
   if (readiness.active_run_id) return 'Another run is still open. Finish or cancel it before starting a new one.';
   if (!readiness.execution_available) return 'The service is not accepting new runs right now.';

@@ -1,6 +1,6 @@
 [project]
 name = "visto"
-version = "0.3.0"
+version = "0.4.0"
 description = "Mobile app testing with AI-owned navigation and semantic assessment"
 license = "MIT"
 requires-python = ">=3.12,<3.13"
@@ -8,6 +8,7 @@ dependencies = [
   "fastapi==0.143.0",
   "pillow==13.0.0",
   "pydantic==2.14.0",
+  "pypdfium2==5.15.2",
   "uvicorn==0.54.0",
 ]
 
@@ -40,6 +41,9 @@ artifacts = ["src/visto/console/**", "src/visto/toolchain/appium/**"]
 "prompts/agent-core.md" = "visto/prompts/agent-core.md"
 "prompts/android-agent-v3.md" = "visto/prompts/android-agent-v3.md"
 "prompts/ios-agent-v1.md" = "visto/prompts/ios-agent-v1.md"
+"prompts/agent-core-v2.md" = "visto/prompts/agent-core-v2.md"
+"prompts/android-agent-v4.md" = "visto/prompts/android-agent-v4.md"
+"prompts/ios-agent-v2.md" = "visto/prompts/ios-agent-v2.md"
 
 [tool.ruff]
 target-version = "py312"

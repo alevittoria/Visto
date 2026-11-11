@@ -19,7 +19,7 @@ backend/src/visto/
   domain/          # run, observation, action, decision and assessment values
   application/     # run loop, context assembly, runtime controls; ports
   adapters/
-    ai/            # provider conversation, response schema, transcription
+    ai/            # provider catalog, one adapter per provider over a shared turn, response schema, transcription
     android/       # Appium session, device inventory
     storage/       # SQLite metadata and local artifacts
     api/           # FastAPI execution, health and statistics routes

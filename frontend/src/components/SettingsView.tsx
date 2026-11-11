@@ -3,7 +3,9 @@ import type { FormEvent } from 'react';
 import { ApiError, isUncertain } from '../console.ts';
 import type { Readiness } from '../console.ts';
 import type { HealthState } from '../health.ts';
-import { deleteKey, loadSettings, saveSettings, setKey, settingsBody, verifyKey, verifyMessage } from '../settings.ts';
+import {
+  activeProvider, deleteKey, loadSettings, providerBody, saveSettings, setKey, settingsBody, verifyKey, verifyMessage, withKey,
+} from '../settings.ts';
 import type { IosSettings, SettingsView as Settings, VerifyResult } from '../settings.ts';
 
 interface Props {
@@ -42,6 +44,7 @@ function ServiceFacts({ health, readiness, connected }: Pick<Props, 'health' | '
       <dl className="facts compact">
         <div><dt>Local service</dt><dd>{version}</dd></div>
         <div><dt>Device automation service</dt><dd>{readiness?.appium_url ?? 'Not set'}</dd></div>
+        <div><dt>AI provider</dt><dd>{readiness?.provider_label ?? 'Unknown'}</dd></div>
         <div><dt>AI provider key</dt><dd>{readiness ? (readiness.provider_key_configured ? 'Configured' : 'Missing') : 'Unknown'}</dd></div>
         <div><dt>Configuration</dt><dd>{readiness ? (readiness.configured ? 'Complete' : 'Incomplete') : 'Unknown'}</dd></div>
       </dl>
@@ -93,30 +96,46 @@ export function SettingsView({ health, readiness, connected, onChanged }: Props)
     } finally { setBusy(false); onChanged(); }
   }
 
+  function chooseProvider(provider: string) {
+    if (!settings || provider === settings.provider) return;
+    const original = settings;
+    setApiKey('');
+    void keyAction(async () => {
+      adopt(await saveSettings(providerBody(original, provider)));
+      const label = original.providers.find((entry) => entry.id === provider)?.label ?? provider;
+      setKeyMessage({ tone: 'info', text: `${label} is now the AI provider. Keys of other providers stay stored.` });
+    }, 'The AI provider could not be changed.');
+  }
+
   function submitKey(event: FormEvent) {
     event.preventDefault();
     const value = apiKey.trim();
-    if (!value) return;
+    if (!value || !settings) return;
+    const provider = settings.provider;
     setApiKey('');
     void keyAction(async () => {
-      const key = await setKey(value);
-      setSettings((current) => (current ? { ...current, key } : current));
+      const key = await setKey(value, provider);
+      setSettings((current) => (current ? withKey(current, provider, key) : current));
       setKeyMessage({ tone: 'info', text: 'Key saved.' });
     }, 'The key could not be saved.');
   }
 
   function removeKey() {
-    if (!window.confirm('Remove the stored provider key? Runs cannot start until a key is saved again.')) return;
+    if (!settings) return;
+    const { id: provider, label } = activeProvider(settings);
+    if (!window.confirm(`Remove the stored ${label} key? Runs cannot start with ${label} until a key is saved again.`)) return;
     void keyAction(async () => {
-      const key = await deleteKey();
-      setSettings((current) => (current ? { ...current, key } : current));
+      const key = await deleteKey(provider);
+      setSettings((current) => (current ? withKey(current, provider, key) : current));
       setKeyMessage({ tone: 'info', text: 'Key removed.' });
     }, 'The key could not be removed.');
   }
 
   function verify() {
+    if (!settings) return;
+    const provider = settings.provider;
     void keyAction(async () => {
-      const result: VerifyResult = await verifyKey();
+      const result: VerifyResult = await verifyKey(provider);
       setKeyMessage({ tone: result === 'ok' ? 'info' : 'error', text: verifyMessage(result) });
     }, 'The key could not be checked.');
   }
@@ -149,15 +168,27 @@ export function SettingsView({ health, readiness, connected, onChanged }: Props)
   }
 
   const { key } = settings;
+  const active = activeProvider(settings);
   return (
     <section aria-labelledby="settings-title">
       <div className="panel">
         <h1 id="settings-title">Settings</h1>
-        <h2>AI provider key</h2>
+        <h2>AI provider</h2>
+        <div className="field">
+          <label htmlFor="provider">Provider used for runs</label>
+          <select id="provider" value={settings.provider} disabled={busy} aria-describedby="provider-help"
+            onChange={(event) => chooseProvider(event.target.value)}>
+            {settings.providers.map((entry) => (
+              <option key={entry.id} value={entry.id}>{entry.label}{entry.key.configured ? ' (key saved)' : ''}</option>
+            ))}
+          </select>
+          <p id="provider-help" className="help">Each provider keeps its own key: switching does not remove the others. Dictation always uses the OpenAI key.</p>
+        </div>
+        <h2>{active.label} key</h2>
         <p role="status">{key.configured ? `Configured, ending in ••••${key.last4 ?? ''}` : 'Not configured'}</p>
         <form onSubmit={submitKey} autoComplete="off">
           <div className="field">
-            <label htmlFor="provider-key">{key.configured ? 'Replace key' : 'Provider API key'}</label>
+            <label htmlFor="provider-key">{key.configured ? 'Replace key' : `${active.label} API key`}</label>
             <input id="provider-key" type="password" autoComplete="off" spellCheck={false} value={apiKey}
               onChange={(event) => setApiKey(event.target.value)} disabled={busy} />
             <p className="help">The key is never shown again after saving. It is stored in plain text in the Visto folder in your user profile; anyone who can read that folder can read it.</p>

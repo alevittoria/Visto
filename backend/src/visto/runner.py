@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from visto.adapters.ai import INSTRUCTION_VERSIONS, OpenAIAgent
+from visto.adapters.ai import AGENTS, DEFAULT_PROVIDER, INSTRUCTION_VERSIONS
 from visto.adapters.android import AppiumDevice
 from visto.adapters.devices import Platform
 from visto.adapters.ios.device import XCUITestDevice
@@ -38,10 +38,13 @@ class RunnerSettings:
     ios_prepare: Callable[[str, float], object] | None = field(
         default=None, compare=False, repr=False
     )
+    provider: str = DEFAULT_PROVIDER
 
     def __post_init__(self):
         if not self.device_id.strip() or not self.model.strip():
             raise ValueError("An explicit device serial and model are required")
+        if self.provider not in AGENTS:
+            raise ValueError("Unsupported AI provider")
         parsed = urlsplit(self.appium_url)
         if (
             parsed.scheme not in ("http", "https")
@@ -57,7 +60,7 @@ class RunnerSettings:
 
 def build_runtime(settings: RunnerSettings, api_key: str, control: MutableRunControl) -> RunLoop:
     """Validate provider configuration before creating local evidence directories."""
-    agent = OpenAIAgent(api_key, settings.model, platform=settings.platform)
+    agent = AGENTS[settings.provider](api_key, settings.model, platform=settings.platform)
     root = settings.data_directory.resolve()
     artifacts = LocalArtifactStore(root / "artifacts")
     store = SQLiteRunStore(root / "runs.sqlite3", artifacts)
@@ -84,7 +87,9 @@ def new_run(settings: RunnerSettings, goal: Goal, clock: SystemClock) -> Run:
         RunConfiguration(
             settings.limits,
             settings.capabilities,
-            ModelIdentity("openai", settings.model, INSTRUCTION_VERSIONS[settings.platform]),
+            ModelIdentity(
+                settings.provider, settings.model, INSTRUCTION_VERSIONS[settings.platform]
+            ),
             DEVICE_ADAPTERS[settings.platform].version,
         ),
         now,

@@ -189,6 +189,9 @@ class ScriptedAgent:
             "Revised plan",
             context.run.configuration.identity,
             previous_effect=effect,
+            presented_attachment_ids=tuple(
+                a.page.attachment_id for a in getattr(context, "attachments", ())
+            ),
         )
         self.after_decide()
         return AgentReply(decision)
@@ -670,3 +673,63 @@ def test_screen_settles_after_dispatched_action_before_next_capture(status, wait
     assert isinstance(asyncio.run(loop.start(run)).terminal, AIConclusion)
     assert device.observations == 2
     assert clock.seconds == waited
+
+
+def attachment_runner(script):
+    from visto.domain.models import AttachmentPage
+
+    loop, run, device, agent, store, clock, control = make_runner(script)
+    pages = []
+    for name in ("a1", "a2"):
+        content = f"layout {name}".encode()
+        reference = asyncio.run(loop.artifacts.put(run.run_id, content, "image/png"))
+        pages.append(AttachmentPage(name, "fictional-layout.png", 1, 1, 80, 160, reference))
+    run = replace(run, goal=replace(run.goal, attachments=tuple(pages)))
+    return loop, run, device, agent, store
+
+
+def test_view_attachments_presents_pages_next_turn_without_device_command():
+    from visto.domain.models import ViewAttachments
+
+    loop, run, device, agent, store = attachment_runner(
+        [ViewAttachments(("a1",)), SemanticVerdict.PASSED]
+    )
+    result = asyncio.run(loop.start(run))
+    assert isinstance(result.terminal, AIConclusion)
+    assert device.executions == []
+    assert len(agent.contexts) == 2 and device.observations == 2
+    assert agent.contexts[0].attachments == ()
+    shown = agent.contexts[1].attachments
+    assert [a.page.attachment_id for a in shown] == ["a1"]
+    assert shown[0].content == b"layout a1"
+    decisions = [r for r in store.records if isinstance(r, AgentDecision)]
+    assert decisions[1].presented_attachment_ids == ("a1",)
+
+
+def test_attachments_are_not_resent_on_later_turns():
+    from visto.domain.models import ViewAttachments
+
+    loop, run, device, agent, store = attachment_runner(
+        [ViewAttachments(("a1", "a2")), ObserveAfter(100), SemanticVerdict.PASSED]
+    )
+    asyncio.run(loop.start(run))
+    assert [len(c.attachments) for c in agent.contexts] == [0, 2, 0]
+    assert agent.contexts[2].seen_attachment_ids == frozenset({"a1", "a2"})
+
+
+def test_finding_citing_unseen_attachment_is_infrastructure_failure():
+    from visto.domain.models import Finding
+
+    loop, run, device, agent, store = attachment_runner([SemanticVerdict.PASSED])
+    original = agent.decide
+
+    async def unseen(context, timeout_ms):
+        reply = await original(context, timeout_ms)
+        finding = Finding("Missing share action", (context.current_observation_id,), ("a1",))
+        assessment = replace(reply.decision.next.assessment, findings=(finding,))
+        return AgentReply(replace(reply.decision, next=Conclude(assessment)))
+
+    agent.decide = unseen
+    result = asyncio.run(loop.start(run))
+    assert isinstance(result.terminal, InfrastructureFailure)
+    assert not any(isinstance(r, AgentDecision) for r in store.records)

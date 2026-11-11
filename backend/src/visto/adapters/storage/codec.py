@@ -22,14 +22,17 @@ _TYPES = (
     models.ModelUsage,
     models.RunConfiguration,
     models.ArtifactRef,
+    models.AttachmentPage,
     models.Observation,
     models.Action,
     models.TechnicalReceipt,
     models.EffectAssessment,
+    models.Finding,
     models.Assessment,
     models.Act,
     models.ObserveAfter,
     models.AskUser,
+    models.ViewAttachments,
     models.Conclude,
     models.AgentDecision,
     run.UserAnswer,
@@ -50,6 +53,13 @@ _ENUMS = (
     run.BudgetKind,
 )
 _REGISTRY = {cls.__name__: cls for cls in (*_TYPES, *_ENUMS)}
+# Fields added after records were first stored: absent in older payloads, they take
+# the dataclass default. Any other missing or extra field is still rejected.
+_ADDED_FIELDS: dict[str, frozenset[str]] = {
+    "Goal": frozenset({"attachments"}),
+    "Assessment": frozenset({"findings"}),
+    "AgentDecision": frozenset({"presented_attachment_ids"}),
+}
 
 
 def _encode(value: object) -> object:
@@ -94,7 +104,9 @@ def _decode(value: object) -> object:
     if cls is None or not is_dataclass(cls) or set(value) != {"tag", "fields"}:
         raise ValueError("Unknown stored type")
     data = value["fields"]
-    if type(data) is not dict or set(data) != {field.name for field in fields(cls)}:
+    expected = {field.name for field in fields(cls)}
+    optional = _ADDED_FIELDS.get(tag, frozenset())
+    if type(data) is not dict or not expected - optional <= set(data) <= expected:
         raise ValueError("Unexpected stored dataclass fields")
     return cls(**{key: _decode(item) for key, item in data.items()})
 

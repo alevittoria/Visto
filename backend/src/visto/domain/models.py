@@ -14,12 +14,24 @@ class Goal:
     text: str = field(repr=False)
     constraints: tuple[str, ...] = field(default=(), repr=False)
     expected_result: str | None = field(default=None, repr=False)
+    # Reference pages the operator attached; observation data, never instructions.
+    attachments: tuple["AttachmentPage", ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         text(self.text)
         items(self.constraints, str)
         if self.expected_result is not None:
             text(self.expected_result)
+        items(self.attachments, AttachmentPage)
+        ids = [page.attachment_id for page in self.attachments]
+        if len(set(ids)) != len(ids):
+            raise ValueError("Duplicate attachment page")
+        if len(ids) > MAX_ATTACHMENT_PAGES:
+            raise ValueError("Too many attachment pages")
+
+    @property
+    def attachment_ids(self) -> frozenset[str]:
+        return frozenset(page.attachment_id for page in self.attachments)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +106,33 @@ class ArtifactRef:
             raise ValueError("Unsupported screenshot media type")
         if not re.fullmatch(r"[0-9a-f]{64}", self.sha256):
             raise ValueError("Expected lowercase SHA256 digest")
+
+
+MAX_ATTACHMENT_PAGES = 40
+MAX_VIEWED_ATTACHMENTS = 4
+
+
+@dataclass(frozen=True, slots=True)
+class AttachmentPage:
+    """One page of an attached file, stored as an owned image artifact of the run."""
+
+    attachment_id: str
+    name: str = field(repr=False)
+    page: int
+    page_count: int
+    width: int
+    height: int
+    image: ArtifactRef
+
+    def __post_init__(self) -> None:
+        text(self.attachment_id, self.name)
+        integer(self.page, self.page_count, minimum=1)
+        integer(self.width, self.height, minimum=1)
+        if self.page > self.page_count:
+            raise ValueError("Attachment page outside its file")
+        instance(self.image, ArtifactRef)
+        if self.image.media_type not in ("image/png", "image/jpeg"):
+            raise ValueError("Attachment page must be an image")
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,17 +266,35 @@ class EffectAssessment:
 
 
 @dataclass(frozen=True, slots=True)
+class Finding:
+    """A difference or note the AI reports with its conclusion; never a verdict by itself."""
+
+    explanation: str = field(repr=False)
+    observation_ids: tuple[str, ...]
+    attachment_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        text(self.explanation)
+        items(self.observation_ids, str)
+        items(self.attachment_ids, str)
+        if not self.observation_ids and not self.attachment_ids:
+            raise ValueError("A finding must cite evidence")
+
+
+@dataclass(frozen=True, slots=True)
 class Assessment:
     run_id: str
     decision_id: str
     verdict: SemanticVerdict
     explanation: str = field(repr=False)
     observation_ids: tuple[str, ...]
+    findings: tuple[Finding, ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         text(self.run_id, self.decision_id, self.explanation)
         instance(self.verdict, SemanticVerdict)
         items(self.observation_ids, str, nonempty=True)
+        items(self.findings, Finding)
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,6 +324,20 @@ class AskUser:
 
 
 @dataclass(frozen=True, slots=True)
+class ViewAttachments:
+    """Present these attachment pages next turn; no device command is run."""
+
+    attachment_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        items(self.attachment_ids, str, nonempty=True)
+        if len(set(self.attachment_ids)) != len(self.attachment_ids):
+            raise ValueError("Duplicate attachment request")
+        if len(self.attachment_ids) > MAX_VIEWED_ATTACHMENTS:
+            raise ValueError("Too many attachments in one view")
+
+
+@dataclass(frozen=True, slots=True)
 class Conclude:
     assessment: Assessment
 
@@ -274,7 +345,7 @@ class Conclude:
         instance(self.assessment, Assessment)
 
 
-type NextDecision = Act | ObserveAfter | AskUser | Conclude
+type NextDecision = Act | ObserveAfter | AskUser | ViewAttachments | Conclude
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,6 +360,8 @@ class AgentDecision:
     identity: ModelIdentity
     usage: ModelUsage = ModelUsage()
     previous_effect: EffectAssessment | None = None
+    # Attachment pages shown to the model in this turn, in presentation order.
+    presented_attachment_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         text(self.decision_id, self.run_id, self.source_observation_id, self.rationale)
@@ -296,7 +369,10 @@ class AgentDecision:
         items(self.presented_observation_ids, str, nonempty=True)
         if len(set(self.presented_observation_ids)) != len(self.presented_observation_ids):
             raise ValueError("Duplicate presented observation")
-        instance(self.next, (Act, ObserveAfter, AskUser, Conclude))
+        instance(self.next, (Act, ObserveAfter, AskUser, ViewAttachments, Conclude))
+        items(self.presented_attachment_ids, str)
+        if len(set(self.presented_attachment_ids)) != len(self.presented_attachment_ids):
+            raise ValueError("Duplicate presented attachment")
         instance(self.identity, ModelIdentity)
         instance(self.usage, ModelUsage)
         if self.previous_effect is not None:

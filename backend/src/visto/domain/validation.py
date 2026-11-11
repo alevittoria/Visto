@@ -11,6 +11,7 @@ from .models import (
     Observation,
     ObserveAfter,
     RunConfiguration,
+    ViewAttachments,
 )
 from .run import Run, RunState
 
@@ -72,8 +73,14 @@ def validate_decision(
     presented_observations: tuple[Observation, ...],
     current_observation_id: str,
     previous_action: Action | None = None,
+    seen_attachment_ids: frozenset[str] = frozenset(),
+    seen_observation_ids: frozenset[str] = frozenset(),
 ) -> None:
-    """Caller supplies persisted observations actually delivered to the model."""
+    """Caller supplies persisted observations actually delivered to the model.
+
+    `seen_attachment_ids` and `seen_observation_ids` are what earlier turns presented:
+    a finding may compare an attachment with a screen the model saw several turns ago.
+    """
     if run.state is not RunState.RUNNING or decision.run_id != run.run_id:
         raise ValueError("Decision is not for this running run")
     if decision.identity != run.configuration.identity:
@@ -100,11 +107,17 @@ def validate_decision(
         raise ValueError("Effect must assess the exact previous action")
     if effect is not None and not set(effect.observation_ids) <= set(ids):
         raise ValueError("Effect cites unpresented evidence")
+    attachments = run.goal.attachment_ids
+    if not set(decision.presented_attachment_ids) <= attachments:
+        raise ValueError("Presented attachment is not part of this run")
     if isinstance(decision.next, Act):
         _command_bounds(decision.next.command, current, decision.next.timeout_ms, run.configuration)
     elif isinstance(decision.next, ObserveAfter):
         if decision.next.delay_ms > run.configuration.limits.max_observation_delay_ms:
             raise ValueError("Observation delay exceeds run limit")
+    elif isinstance(decision.next, ViewAttachments):
+        if not set(decision.next.attachment_ids) <= attachments:
+            raise ValueError("Requested attachment is not part of this run")
     elif isinstance(decision.next, Conclude):
         assessment = decision.next.assessment
         if (
@@ -113,6 +126,12 @@ def validate_decision(
             or not set(assessment.observation_ids) <= set(ids)
         ):
             raise ValueError("Conclusion scope/evidence mismatch")
+        seen = set(seen_attachment_ids) | set(decision.presented_attachment_ids)
+        for finding in assessment.findings:
+            if not set(finding.observation_ids) <= set(ids) | set(seen_observation_ids):
+                raise ValueError("Finding cites unpresented observation")
+            if not set(finding.attachment_ids) <= seen & attachments:
+                raise ValueError("Finding cites an attachment the model has not seen")
 
 
 def validate_action(

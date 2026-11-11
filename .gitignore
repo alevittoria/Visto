@@ -28,3 +28,6 @@ backend/src/visto/toolchain/appium/
 Thumbs.db
 .idea/
 .vscode/
+
+# Brainstorming mockups and agent session state
+.superpowers/

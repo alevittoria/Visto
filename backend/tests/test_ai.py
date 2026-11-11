@@ -16,7 +16,7 @@ from visto.adapters.ai import (
     OpenAIAgent,
     load_instructions,
 )
-from visto.adapters.ai.openai import history_data
+from visto.adapters.ai.agent import history_data
 from visto.adapters.devices import Platform
 from visto.application.context import AgentContext, PresentedImage
 from visto.application.ports import PortError
@@ -69,6 +69,7 @@ def payload():
             "verdict": "inconclusive",
             "explanation": "Insufficient evidence",
             "observation_ids": ["o"],
+            "findings": [],
         },
     }
 
@@ -145,6 +146,7 @@ def test_errors_are_explicit_sanitized_and_never_retry(context, change):
             "verdict": "passed",
             "explanation": "bad",
             "observation_ids": ["alien"],
+            "findings": [],
         },
         {"kind": "ask_user", "question": "q", "extra": 1},
     ],
@@ -198,8 +200,22 @@ def test_long_press_and_enter_decode_from_provider(context, command, expected):
 
 
 def test_android_instructions_are_byte_identical_after_refactoring():
-    rendered = load_instructions(Platform.ANDROID)
+    from visto.adapters.ai.agent import render_instructions
+
+    rendered = render_instructions("android-agent-v3", Platform.ANDROID)
     assert hashlib.sha256(rendered.encode()).hexdigest() == ANDROID_INSTRUCTIONS_SHA256
+
+
+def test_current_instructions_explain_attachments_and_findings():
+    assert INSTRUCTION_VERSIONS == {
+        Platform.ANDROID: "android-agent-v4",
+        Platform.IOS: "ios-agent-v2",
+    }
+    for platform in Platform:
+        text = load_instructions(platform)
+        assert "view_attachments" in text and "findings" in text
+        assert "never data values" in text
+        assert "{{" not in text and "<!--" not in text
 
 
 def test_ios_instructions_name_the_platform_and_its_navigation_reality():
@@ -221,6 +237,11 @@ def test_every_prompt_resource_the_loader_reads_is_packaged_in_the_wheel():
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     config = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     included = config["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
-    needed = ["agent-core.md", *(f"{INSTRUCTION_VERSIONS[p]}.md" for p in Platform)]
+    from visto.adapters.ai.agent import INSTRUCTION_CORES
+
+    needed = [
+        *set(INSTRUCTION_CORES.values()),
+        *(f"{INSTRUCTION_VERSIONS[p]}.md" for p in Platform),
+    ]
     for name in needed:
         assert included.get(f"prompts/{name}") == f"visto/prompts/{name}"

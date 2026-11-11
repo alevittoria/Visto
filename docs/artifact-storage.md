@@ -9,11 +9,12 @@ Visto keeps everything it stores in one folder per user, the Visto home:
 ```text
 ~/.visto/
   settings.json                  preferences and iOS signing values (versioned format)
-  secrets.json                   the provider key, in plain text
+  secrets.json                   the AI provider keys, in plain text
   data/
     runs.sqlite3                 run history
     runs.sqlite3.v<N>-<UTC timestamp>.bak   backup taken before a data upgrade
-    artifacts/                   screenshots and their metadata
+    artifacts/                   screenshots, attachment pages and their metadata
+    staging/<upload id>/         attachments uploaded but not yet claimed by a run (expire after an hour)
     prices.sqlite3               daily model price lists
     device-leases/<sha256(serial)>.lease    device ownership markers
   toolchain/                     Node, JDK, Android SDK tools, Appium (state.json lists the active versions)
@@ -31,8 +32,8 @@ never changes the mode of a folder or database that already exists, including a
 `--data-dir` you created yourself; check those permissions yourself. On Windows
 these files get no extra protection: they inherit the access rules of your user
 profile folder, which normally admit your account, administrators and the system.
-**The provider key is stored in plain text**, not in an operating-system credential store and not encrypted; anyone who can read your
-profile folder can read it. The key never appears in API responses, logs, reports
+**The provider keys are stored in plain text**, not in an operating-system credential store and not encrypted; anyone who can read your
+profile folder can read them. No key ever appears in API responses, logs, reports
 or command output.
 
 `logs/appium.log` is private: Appium can log request bodies, entered text and
@@ -70,17 +71,20 @@ are reported as sanitized `PortError` values.
 ## Stored information
 
 The database contains immutable request text, expected result, constraints,
+attachment page references (name, page number, size and the owned image artifact),
 model/provider/instruction identity, adapter version, technical limits, run
 lifecycle revisions, observations, decisions, action intents, receipts, pending
 questions, attributed answers and terminal records. Decisions preserve the exact
-IDs of evidence presented to the model, its working plan and reported token
+IDs of evidence presented to the model, including attachment pages, its working plan and reported token
 usage. Unknown usage stays unknown. AI assessments are recorded opinions, never
 ground-truth labels. Technical command completion is not an application pass.
 
 The adapter uses a versioned schema (see
 [data upgrades](#data-upgrades-and-backups)) and a closed tagged JSON format with
 explicit allowlisted domain types. Unknown versions, tags, duplicate JSON keys and extra
-fields are rejected. No pickle or runtime imports from stored values are used.
+fields are rejected. Fields added after records were first stored (goal attachments,
+conclusion findings, presented attachment IDs) may be absent in older records and
+then read as empty, so earlier runs load unchanged without a data upgrade. No pickle or runtime imports from stored values are used.
 SQL values use placeholders, including arbitrary run IDs. A connection is opened
 per operation with Python 3.12 `autocommit=True`, foreign keys and full synchronous
 writes. Explicit `BEGIN IMMEDIATE`/`COMMIT`/`ROLLBACK` transactions serialize

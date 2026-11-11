@@ -24,19 +24,23 @@ with `detail` naming only invalid field locations, never submitted values.
 ## Configuration and creation
 
 - `GET /health`: existing product/version/runtime_ready liveness response.
-- `GET /readiness`: `{configured, provider_key_configured, configuration_error,
-  model, models, appium_url, device_selection:"manual", devices:[], active_run_id,
+- `GET /readiness`: `{configured, provider, provider_label, provider_key_configured,
+  dictation_available, configuration_error, model, models, appium_url, device_selection:"manual", devices:[], active_run_id,
   cleanup_attention_run_ids, execution_available, default_limits, platforms}`.
   `platforms` lists the platforms (`"android"`, `"ios"`) whose device sources this
   process has configured (iOS sources only on macOS); it is derived from configuration,
   not from attached devices. Configuration-only: no device/provider
   network calls and no Appium session. Operator enters the exact authorized ADB
   serial (or picks one from `GET /devices`); physical connectivity is checked
-  when a run starts. Readiness itself never runs adb. The provider key is read
-  server-side from the settings store in the Visto home; `configuration_error` is
-  set when the settings files cannot be used.
-  `model` is the default; `models` is the operator-selectable allowlist
-  (`gpt-6-luna` default, `gpt-5.6-terra`, `gpt-6-sol`).
+  when a run starts. Readiness itself never runs adb. `provider` is the active AI
+  provider (`openai`, `anthropic` or `gemini`) and `provider_key_configured` tells
+  whether that provider's key is stored; keys are read server-side from the
+  settings store in the Visto home. `dictation_available` is true when the OpenAI
+  key used for transcription is stored. `configuration_error` is set when the
+  settings files cannot be used. `model` is the active provider's default; `models`
+  is its operator-selectable allowlist (see
+  [provider setup](provider-setup.md)). `POST /runs` uses the active provider and
+  rejects a model outside its list with 422.
 - `GET /devices`: `{available, devices:[{serial,platform,state,model,product,selectable}],
   error, notes}`. `platform` is `"android"` or `"ios"`. Android entries come from one
   fixed, read-only `adb devices -l` (5 s timeout, one at a time) with the managed
@@ -50,7 +54,12 @@ with `detail` naming only invalid field locations, never submitted values.
 - `POST /runs` (202): `{device_id, model:null, goal, expected_result:null,
   constraints:[], observe_only:false, platform:"android", limits:{wall_time_ms:1200000,
   max_actions:60,max_inferences:90,max_command_timeout_ms:60000,
-  max_observation_delay_ms:10000}}`. Optional fields use those defaults.
+  max_observation_delay_ms:10000}, attachments:[]}`. Optional fields use those defaults.
+  `attachments` lists up to 20 upload ids from `POST /attachments`, in attach order;
+  their pages (at most 40 per run) become owned artifacts of the run and the
+  uploads are consumed. An unknown or expired id returns 422 and starts nothing.
+  The run's `goal.attachments` lists each page as `{attachment_id, name, page,
+  page_count, width, height, media_type, url}`; storage keys are never returned.
   `model` null means the default; a value outside `models` returns 422.
   `platform` is `"android"` (default, so existing callers are unchanged) or `"ios"`;
   any other value, or `"ios"` when `platforms` does not list it, returns 422. Creation lists no devices: a device that does not match
@@ -59,13 +68,26 @@ with `detail` naming only invalid field locations, never submitted values.
   Returns a Run. Exactly one retained execution session; a paused or waiting run
   reserves that slot until completion/cancellation. There is no waiting queue.
 
+- `POST /attachments?name=<file name>`: one reference file as the raw body, with
+  the local console guard. PNG, JPG and PDF are accepted by their bytes, not their
+  name or `Content-Type`; PDF pages are rendered to PNG locally. Returns `{upload_id,
+  name, page_count}`. Errors: 413 above 20 MB, 422 with a plain reason for an
+  unsupported, damaged, password-protected or empty file or one with more than 40
+  pages. Uploads not claimed by a run expire after an hour and are removed at
+  startup. `DELETE /attachments/{upload_id}` discards one.
+- `POST /runs/{run_id}/attachments/stage`: stages a stored run's attachments again,
+  one upload per original file, for a rerun; returns `[{upload_id, name,
+  page_count}]`, 404 when the run has none or they can no longer be read.
+- `GET /runs/{run_id}/attachments/{attachment_id}`: one attachment page image, with
+  the same no-sniff and content-security headers as screenshots.
+
 - `POST /transcriptions`: dictated goal or expected-result text. Body is the raw
   recording; `Content-Type` must be `audio/webm`, `audio/mp4`, `audio/mpeg` or
   `audio/wav` (parameters such as `;codecs=opus` are ignored). Requires the local
   console guard. Returns `{text, model:"gpt-transcribe"}`; the console appends
   `text` to the field for the operator to review. Nothing is stored and no run is
   touched. Errors: 413 above 10 MiB, 415 other types, 422 empty body, 503 no
-  provider key, 429 while another transcription is in flight, 502
+  OpenAI key (dictation always uses it, whichever provider is active), 429 while another transcription is in flight, 502
   `Transcription failed (provider: <category>)` with a sanitized category only.
   One provider request through the same fixed HTTPS worker as runs (60 s timeout).
 
@@ -80,29 +102,37 @@ Settings are stored in the Visto home and read when used, so changes apply to th
 next run without a restart. Every write uses the local-console guard above.
 `503 Local settings are invalid` means a settings or secrets file cannot be used.
 
-- `GET /settings`: `{price_refresh, ios_supported, ios, key:{configured, last4,
-  storage:"file"}, wda_project, wda_rebuild_needed}`. `ios` is
+- `GET /settings`: `{price_refresh, provider, providers, ios_supported, ios,
+  key:{configured, last4, storage:"file"}, wda_project, wda_rebuild_needed}`.
+  `provider` is the active provider's id; `providers` lists every provider as
+  `{id, label, default_model, models, key}`, each with its own key status; `key` is
+  the active provider's. `ios` is
   `{team_id, signing_id, wda_bundle_id, prebuilt_wda, wda_derived_data}` when the
   host supports iOS (macOS) and null otherwise; `wda_project` is the
   WebDriverAgent project path inside the managed Appium install or null;
   `wda_rebuild_needed` is true when the installed XCUITest driver differs from the
   one recorded when the iOS values were last saved. The key itself is never
   returned by any route.
-- `PUT /settings`: `{price_refresh, ios?}` with the `ios` fields above (strings of
+- `PUT /settings`: `{price_refresh, ios?, provider?}`. `provider` switches the
+  active provider (unknown ids return 422; omitting it keeps the current one);
+  every provider's stored key is kept. The `ios` fields are those above (strings of
   at most 64/256/256/1024 characters, `prebuilt_wda` a boolean; unknown fields are
   rejected). Omitting `ios` keeps the stored values; sending it on a host without
   iOS support returns 422. Saving `ios` records the installed XCUITest driver
   version. Returns the `GET /settings` view.
-- `PUT /settings/key`: `{api_key}` (at most 8192 characters). Stores the key and
-  returns `{configured, last4, storage}`. An empty key or one containing
+- `PUT /settings/key`: `{api_key, provider?}` (key at most 8192 characters).
+  Stores the key for `provider`, or for the active provider when omitted, leaving
+  other providers' keys unchanged, and returns `{configured, last4, storage}`. An empty key or one containing
   whitespace or control characters returns 422 with a message that never contains
   the value.
-- `DELETE /settings/key`: removes the stored key; returns `{configured:false,
-  last4:null, storage}`.
-- `POST /settings/key/verify`: `{result}` with `result` one of `ok`, `missing`,
-  `unauthorized`, `model_unavailable` or `unreachable`. Retrieves the default
-  model's metadata (`GET https://api.openai.com/v1/models/{model}`, 10 s timeout)
-  with the stored key through the fixed HTTPS worker; no inference, not billed.
+- `DELETE /settings/key?provider=<id>`: removes that provider's key (the active
+  provider's without the parameter); returns `{configured:false, last4:null,
+  storage}`.
+- `POST /settings/key/verify?provider=<id>`: `{result}` with `result` one of `ok`,
+  `missing`, `unauthorized`, `model_unavailable` or `unreachable`. Retrieves that
+  provider's (default: the active one's) default model metadata through its fixed
+  model route (see [provider setup](provider-setup.md), 10 s timeout) with its
+  stored key through the fixed HTTPS worker; no inference, not billed.
   401/403 map to `unauthorized`, 404 to `model_unavailable`, any other failure to
   `unreachable`.
 

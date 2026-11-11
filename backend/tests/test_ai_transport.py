@@ -37,7 +37,8 @@ def local_worker(script):
 
 
 def test_local_worker_receives_secret_only_on_stdin_with_fixed_hidden_invocation(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "private-key")
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        monkeypatch.setenv(name, "private-key")
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8080")
     script = (
         "import base64,json,sys; packet=json.load(sys.stdin); "
@@ -54,7 +55,7 @@ def test_local_worker_receives_secret_only_on_stdin_with_fixed_hidden_invocation
         assert args == [sys.executable, "-m", "visto.adapters.ai.http_worker"]
         assert "private-key" not in repr((args, kwargs))
         assert "shell" not in kwargs
-        assert "OPENAI_API_KEY" not in kwargs["env"]
+        assert "private-key" not in kwargs["env"].values()
         assert kwargs["env"]["HTTPS_PROXY"] == "http://proxy.example:8080"
         assert kwargs["stderr"] == asyncio.subprocess.DEVNULL
         if os.name == "nt":
@@ -150,6 +151,7 @@ def test_worker_http_failure_does_not_return_secret_response_body(monkeypatch):
 
     monkeypatch.setattr(http_worker, "urlopen", fail)
     packet = {
+        "provider": "openai",
         "api_key": "private-key",
         "payload": base64.b64encode(b"{}").decode(),
         "timeout_ms": 1000,
@@ -178,6 +180,7 @@ def test_worker_classifies_network_failure_without_disclosing_details(monkeypatc
 
     monkeypatch.setattr(http_worker, "urlopen", fail)
     packet = {
+        "provider": "openai",
         "api_key": "private-key",
         "payload": base64.b64encode(b"{}").decode(),
         "timeout_ms": 1000,
@@ -189,6 +192,7 @@ def test_worker_classifies_network_failure_without_disclosing_details(monkeypatc
 def test_worker_classifies_invalid_response_json_without_disclosing_body(monkeypatch):
     monkeypatch.setattr(http_worker, "urlopen", lambda *a, **kw: BytesIO(b"private body/key"))
     packet = {
+        "provider": "openai",
         "api_key": "private-key",
         "payload": base64.b64encode(b"{}").decode(),
         "timeout_ms": 1000,
@@ -298,7 +302,7 @@ def test_worker_probe_uses_fixed_get(monkeypatch):
         return BytesIO(b'{"id":"gpt-6-luna"}')
 
     monkeypatch.setattr(http_worker, "urlopen", fake)
-    packet = {"api_key": "k", "probe_model": "gpt-6-luna", "timeout_ms": 1000}
+    packet = {"provider": "openai", "api_key": "k", "probe_model": "gpt-6-luna", "timeout_ms": 1000}
     assert http_worker.handle_packet(json.dumps(packet).encode()) == {
         "response": {"id": "gpt-6-luna"}
     }
@@ -312,7 +316,7 @@ def test_worker_probe_uses_fixed_get(monkeypatch):
 def test_worker_probe_rejects_invalid_model_before_request(monkeypatch, model):
     calls = []
     monkeypatch.setattr(http_worker, "urlopen", lambda *a, **kw: calls.append(a))
-    packet = {"api_key": "k", "probe_model": model, "timeout_ms": 1000}
+    packet = {"provider": "openai", "api_key": "k", "probe_model": model, "timeout_ms": 1000}
     assert http_worker.handle_packet(json.dumps(packet).encode()) == {
         "error": "provider: invalid_request"
     }
@@ -321,7 +325,8 @@ def test_worker_probe_rejects_invalid_model_before_request(monkeypatch, model):
 
 def test_worker_probe_packet_rejects_extra_fields(monkeypatch):
     monkeypatch.setattr(http_worker, "urlopen", lambda *a, **kw: pytest.fail("request"))
-    packet = {"api_key": "k", "probe_model": "m", "timeout_ms": 1000, "payload": "e30="}
+    packet = {"provider": "openai", "api_key": "k", "probe_model": "m", "timeout_ms": 1000}
+    packet["payload"] = "e30="
     assert http_worker.handle_packet(json.dumps(packet).encode()) == {
         "error": "provider: invalid_request"
     }
@@ -330,7 +335,8 @@ def test_worker_probe_packet_rejects_extra_fields(monkeypatch):
 def test_parent_probe_sends_no_payload_and_validates_model():
     script = (
         "import json,sys; p=json.load(sys.stdin); "
-        "assert set(p)=={'api_key','probe_model','timeout_ms'} and p['probe_model']=='gpt-6-luna'; "
+        "assert set(p)=={'provider','api_key','probe_model','timeout_ms'}; "
+        "assert p['probe_model']=='gpt-6-luna'; "
         "print(json.dumps({'response':{'id':'gpt-6-luna'}}))"
     )
 

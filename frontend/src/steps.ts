@@ -19,6 +19,7 @@ export interface Step {
 const NON_ACTION_SUMMARY: Record<string, string> = {
   observe_after: 'Wait and look again',
   ask_user: 'Asked a question',
+  view_attachments: 'Looked at attached files',
   conclude: 'Concluded',
 };
 

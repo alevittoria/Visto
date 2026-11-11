@@ -12,7 +12,8 @@ from dataclasses import dataclass
 SOURCE_NAME = "AI Pricing Guru"
 SOURCE_URL = "https://www.aipricing.guru/api/pricing.json"
 ATTRIBUTION = "Prices: AI Pricing Guru (aipricing.guru), verify with the provider before budgeting."
-PROVIDER = "openai"
+# Price-list provider names of the AI providers Visto drives (adapters/ai/providers).
+PROVIDERS = frozenset(("openai", "anthropic", "google"))
 MAX_BYTES = 4 * 1024 * 1024
 
 
@@ -31,13 +32,13 @@ def _rate(value: object) -> float | None:
 
 
 def parse_prices(content: bytes) -> PriceSheet:
-    """Keeps base input/output rates of the provider adapter's models only."""
+    """Keeps base input/output rates of the provider adapters' models only."""
     data = json.loads(content)
     if not isinstance(data, dict) or not isinstance(data.get("models"), list):
         raise ValueError("Unexpected pricing document")
     prices = {}
     for model in data["models"]:
-        if not isinstance(model, dict) or model.get("provider") != PROVIDER:
+        if not isinstance(model, dict) or model.get("provider") not in PROVIDERS:
             continue
         identifier, pricing = model.get("id"), model.get("pricing")
         if not isinstance(identifier, str) or not identifier or not isinstance(pricing, dict):

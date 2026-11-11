@@ -12,6 +12,7 @@ import { StartScreen } from './components/StartScreen.tsx';
 import { StatsView } from './components/StatsView.tsx';
 import { settingsFromHash } from './settings.ts';
 import { rerunPlan, rerunServiceBlock } from './start.ts';
+import { runAttachments, stageFromRun, withAttachments } from './attachments.ts';
 import { statsFromHash } from './stats.ts';
 
 export interface ReadinessState { readiness: Readiness | null; connected: boolean; checking: boolean; checkedAt: number | null }
@@ -262,8 +263,17 @@ export function App() {
       }
       const plan = rerunPlan(run, devices, ready.readiness, ready.connected, defaults.current);
       if (plan.kind === 'blocked') { block(plan.reason); return; }
+      let request = plan.request;
+      if (runAttachments(run).length > 0) {
+        try {
+          request = withAttachments(request, await stageFromRun(run.run_id));
+        } catch (error) {
+          block(error instanceof ApiError ? error.message : 'The attached files of this run could not be prepared, so no run was started.');
+          return;
+        }
+      }
       setCreateError(null);
-      const result = await submitRun(plan.request);
+      const result = await submitRun(request);
       // The run view has no Refresh button: point to the start screen's Refresh instead,
       // and explain there why Start is unavailable until then.
       if (!result.started && result.uncertain) setCreateError(result.error);
@@ -306,6 +316,13 @@ export function App() {
     setForm(formFromRun(run, ready.readiness?.models ?? [], defaults.current));
     setCreateError(null);
     select(null);
+    if (runAttachments(run).length > 0) {
+      // The files come back as fresh uploads the operator can keep or remove.
+      stageFromRun(run.run_id).then(
+        (staged) => setForm((current) => ({ ...current, attachments: [...current.attachments, ...staged] })),
+        () => setCreateError('The attached files of this run could not be prepared. Attach them again before starting.'),
+      );
+    }
   }
 
   const sidebarShown = narrow ? drawerOpen : !sidebarCollapsed;

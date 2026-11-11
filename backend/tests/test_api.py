@@ -4,6 +4,7 @@ import asyncio
 import re
 import shutil
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -738,7 +739,7 @@ def test_run_creation_defaults_to_android_and_accepts_ios(directory):
         assert (
             configuration["identity"]["instruction_version"] == INSTRUCTION_VERSIONS[Platform.IOS]
         )
-        assert configuration["identity"]["instruction_version"] == "ios-agent-v1"
+        assert configuration["identity"]["instruction_version"] == "ios-agent-v2"
         cancelled = client.post("/api/runs/" + ios.json()["run_id"] + "/cancel", headers=HEADERS)
         assert cancelled.status_code == 202
     assert seen == [Platform.ANDROID, Platform.IOS]
@@ -955,3 +956,138 @@ def test_console_never_touches_paths_outside_its_root(directory, monkeypatch, pa
     console = str(directory / "console")
     outside = [p for p in touched if not p.startswith(console)]
     assert not [p for p in outside if "attacker" in p or "win.ini" in p or "secret" in p]
+
+
+def test_run_uses_the_active_provider_key_model_and_identity(directory):
+    service = make_service(directory)
+    store = service.settings.settings_store
+    store.set_api_key("sk-ant-0002", "anthropic")
+    store.save(replace(store.load(), provider="anthropic"))
+    seen = []
+
+    def factory(settings, key, control):
+        seen.append((settings.provider, settings.model, key))
+        return FakeLoop(service, control)
+
+    service.runtime_factory = factory
+    with TestClient(create_app(service), base_url="http://localhost") as client:
+        refused = client.post("/api/runs", headers=HEADERS, json={**BODY, "model": "gpt-6-luna"})
+        assert refused.status_code == 422
+        created = client.post("/api/runs", headers=HEADERS, json=BODY).json()
+        identity = created["configuration"]["identity"]
+        assert identity["provider"] == "anthropic" and identity["model"] == "claude-opus-5-5"
+    assert seen == [("anthropic", "claude-opus-5-5", "sk-ant-0002")]
+
+
+def test_active_provider_without_its_key_is_not_configured(directory):
+    service = make_service(directory)  # Only an OpenAI key is stored.
+    store = service.settings.settings_store
+    store.save(replace(store.load(), provider="gemini"))
+    with TestClient(create_app(service), base_url="http://localhost") as client:
+        readiness = client.get("/api/readiness").json()
+        assert readiness["configured"] is False and readiness["provider"] == "gemini"
+        assert readiness["dictation_available"] is True
+        assert client.post("/api/runs", headers=HEADERS, json=BODY).status_code == 503
+
+
+def png_bytes(color="white"):
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (40, 80), color).save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+def upload(client, name, content):
+    return client.post("/api/attachments", params={"name": name}, content=content, headers=HEADERS)
+
+
+def test_upload_create_run_and_fetch_attachment_page(directory):
+    service = make_service(directory)
+    with TestClient(create_app(service), base_url="http://localhost") as client:
+        staged = upload(client, "fictional-login.png", png_bytes()).json()
+        assert staged["name"] == "fictional-login.png" and staged["page_count"] == 1
+        created = client.post(
+            "/api/runs", headers=HEADERS, json={**BODY, "attachments": [staged["upload_id"]]}
+        ).json()
+        (page,) = created["goal"]["attachments"]
+        assert page["name"] == "fictional-login.png" and "image" not in page
+        assert page["url"] == f"/api/runs/{created['run_id']}/attachments/{page['attachment_id']}"
+        image = client.get(page["url"])
+        assert image.status_code == 200 and image.content == png_bytes()
+        assert image.headers["content-type"] == "image/png"
+        assert client.get(f"/api/runs/{created['run_id']}/attachments/unknown").status_code == 404
+        # A staged upload is consumed by the run that claimed it.
+        again = client.post(
+            "/api/runs", headers=HEADERS, json={**BODY, "attachments": [staged["upload_id"]]}
+        )
+        assert again.status_code in (409, 422)
+
+
+def test_upload_requires_the_local_console_guard(directory):
+    with TestClient(create_app(make_service(directory)), base_url="http://localhost") as client:
+        refused = client.post("/api/attachments", params={"name": "x.png"}, content=png_bytes())
+        assert refused.status_code == 403
+
+
+def test_upload_rejects_bad_type_and_size_with_422(directory):
+    from visto.adapters.attachments import MAX_FILE_BYTES
+
+    with TestClient(create_app(make_service(directory)), base_url="http://localhost") as client:
+        bad = upload(client, "fictional.png", b"not an image at all")
+        assert bad.status_code == 422 and "PNG, JPG and PDF" in bad.json()["detail"]
+        big = upload(client, "big.png", png_bytes() + b"\0" * MAX_FILE_BYTES)
+        assert big.status_code in (413, 422)
+        assert upload(client, "", png_bytes()).status_code == 422
+
+
+def test_create_with_unknown_upload_is_422_and_starts_nothing(directory):
+    service = make_service(directory)
+    with TestClient(create_app(service), base_url="http://localhost") as client:
+        response = client.post(
+            "/api/runs", headers=HEADERS, json={**BODY, "attachments": ["0" * 32]}
+        )
+        assert response.status_code == 422
+        assert client.get("/api/runs").json()["runs"] == []
+
+
+def test_stage_from_previous_run_for_rerun(directory):
+    service = make_service(directory)
+    with TestClient(create_app(service), base_url="http://localhost") as client:
+        first = upload(client, "fictional-a.png", png_bytes("white")).json()
+        second = upload(client, "fictional-b.png", png_bytes("black")).json()
+        created = client.post(
+            "/api/runs",
+            headers=HEADERS,
+            json={**BODY, "attachments": [first["upload_id"], second["upload_id"]]},
+        ).json()
+        eventually(client, created["run_id"], "running")
+        client.post(f"/api/runs/{created['run_id']}/cancel", headers=HEADERS)
+        eventually(client, created["run_id"], "terminal")
+        staged = client.post(
+            f"/api/runs/{created['run_id']}/attachments/stage", headers=HEADERS
+        ).json()
+        assert [s["name"] for s in staged] == ["fictional-a.png", "fictional-b.png"]
+        rerun = client.post(
+            "/api/runs",
+            headers=HEADERS,
+            json={**BODY, "attachments": [s["upload_id"] for s in staged]},
+        ).json()
+        assert [p["name"] for p in rerun["goal"]["attachments"]] == [
+            "fictional-a.png",
+            "fictional-b.png",
+        ]
+
+
+def test_stage_from_run_without_readable_attachments_is_404(directory):
+    service = make_service(directory)
+    with TestClient(create_app(service), base_url="http://localhost") as client:
+        created = client.post("/api/runs", headers=HEADERS, json=BODY).json()
+        eventually(client, created["run_id"], "running")
+        response = client.post(f"/api/runs/{created['run_id']}/attachments/stage", headers=HEADERS)
+        assert response.status_code == 404
+        assert (
+            client.post("/api/runs/missing/attachments/stage", headers=HEADERS).status_code == 404
+        )

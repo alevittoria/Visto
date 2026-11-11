@@ -16,6 +16,7 @@ from visto.domain.models import (
     ObserveAfter,
     ReceiptStatus,
     TechnicalReceipt,
+    ViewAttachments,
 )
 from visto.domain.run import (
     AIConclusion,
@@ -31,7 +32,7 @@ from visto.domain.run import (
 )
 from visto.domain.validation import validate_action, validate_decision
 
-from .context import AgentContext, AgentReply, PresentedImage
+from .context import AgentContext, AgentReply, PresentedAttachment, PresentedImage
 from .ports import (
     Agent,
     ArtifactStore,
@@ -304,6 +305,20 @@ class RunLoop:
         images = tuple(
             [PresentedImage(o, await self.artifacts.read(o.screenshot)) for o in selected]
         )
+        pages = {page.attachment_id: page for page in run.goal.attachments}
+        requested = (
+            decisions[-1].next.attachment_ids
+            if decisions and isinstance(decisions[-1].next, ViewAttachments)
+            else ()
+        )
+        attachments = tuple(
+            [
+                PresentedAttachment(pages[i], await self.artifacts.read(pages[i].image))
+                for i in requested
+            ]
+        )
+        seen_attachments = frozenset(i for d in decisions for i in d.presented_attachment_ids)
+        seen_observations = frozenset(i for d in decisions for i in d.presented_observation_ids)
         return AgentContext(
             run,
             images,
@@ -314,6 +329,9 @@ class RunLoop:
             recent,
             answers,
             self._sessions[run.run_id].conversation_id,
+            attachments,
+            seen_attachments,
+            seen_observations,
         )
 
     async def _decide(self, context: AgentContext, timeout: int) -> AgentReply | None:
@@ -429,7 +447,13 @@ class RunLoop:
                     tuple(i.observation for i in context.images),
                     current.observation_id,
                     context.previous_action,
+                    context.seen_attachment_ids,
+                    context.seen_observation_ids,
                 )
+                if decision.presented_attachment_ids != tuple(
+                    a.page.attachment_id for a in context.attachments
+                ):
+                    raise ValueError("Decision must record the exact presented attachments")
                 component = "storage"
                 await self.store.append(decision)
                 self._sessions[run.run_id].conversation_id = reply.conversation_id

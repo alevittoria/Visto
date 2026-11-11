@@ -17,8 +17,9 @@ test accounts/data. Appium may install automation helper APKs on first
 connection; it does not install/reset the target app. Keep other automation
 clients away from this device during the run. No device is silently selected.
 
-An OpenAI API key with billing/model access is required. Store it once on the
-console's Settings page or with `visto settings set-key`, and check it with
+An API key with billing/model access for the active AI provider (OpenAI unless
+you chose Anthropic or Google Gemini) is required. Store it once on the console's
+Settings page or with `visto settings set-key`, and check it with
 `visto settings verify-key` (see [provider setup](provider-setup.md)). Each run
 reads it from the Visto home when it starts. The key is not copied into
 arguments, reports or request artifacts. Screenshots, goal,
@@ -67,10 +68,13 @@ visto run --device <serial> \
 ```
 
 One AI judges navigation and meaning from screenshots. No page labels or success
-predicates are coded into the runner. Default model is `gpt-6-luna`; `--model`
-changes it explicitly. Account access is required; no fallback exists.
+predicates are coded into the runner. The default model is the active provider's
+(`gpt-6-luna` for OpenAI); `--model` changes it explicitly within that provider's
+list. Account access is required; no fallback exists.
 `--goal-file` or `--request-file` (UTF-8 JSON with `goal`, `constraints`,
-`expected_result`) avoid shell quoting issues for long goals.
+`expected_result`) avoid shell quoting issues for long goals. `--attach <file>`
+(repeatable) adds PNG, JPG or PDF reference files, validated before Appium or the
+provider are contacted.
 
 ## Read the result and evidence
 

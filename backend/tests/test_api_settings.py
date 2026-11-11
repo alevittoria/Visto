@@ -35,14 +35,15 @@ def home():
 
 @pytest.fixture
 def host():
-    return SimpleNamespace(version="1.0.0", probes=[], outcome=None)
+    return SimpleNamespace(version="1.0.0", probes=[], providers=[], outcome=None)
 
 
 def make_client(home, host, *, ios):
     service = ExecutionService(WebSettings(home.data, SettingsStore(home), home.leases))
 
-    async def prober(key, model, timeout_ms):
+    async def prober(key, model, timeout_ms, provider):
         host.probes.append((key, model, timeout_ms))
+        host.providers.append(provider)
         if host.outcome is not None:
             raise PortError(host.outcome)
         return {"id": model}
@@ -163,3 +164,58 @@ def test_verify_maps_probe_outcomes(client, host, code, result):
     r = client.post("/api/settings/key/verify", headers=LOCAL)
     assert r.json() == {"result": result}
     assert host.probes == [("sk-test-abcd9876", "gpt-6-luna", 10000)]
+
+
+def test_providers_listed_with_their_own_key_status(client, home):
+    SettingsStore(home).set_api_key("sk-openai-0001")
+    body = client.get("/api/settings").json()
+    assert body["provider"] == "openai"
+    assert body["key"] == {"configured": True, "last4": "0001", "storage": "file"}
+    listed = {entry["id"]: entry for entry in body["providers"]}
+    assert set(listed) == {"openai", "anthropic", "gemini"}
+    assert listed["anthropic"]["key"]["configured"] is False
+    assert listed["gemini"]["default_model"] == listed["gemini"]["models"][0]
+    assert "sk-openai-0001" not in str(body)
+
+
+def test_switching_provider_keeps_every_stored_key(client, home):
+    store = SettingsStore(home)
+    store.set_api_key("sk-openai-0001")
+    put = client.put(
+        "/api/settings/key", json={"api_key": "sk-ant-0002", "provider": "anthropic"}, headers=LOCAL
+    )
+    assert put.json()["last4"] == "0002"
+    switched = client.put(
+        "/api/settings", json={"price_refresh": True, "provider": "anthropic"}, headers=LOCAL
+    )
+    assert switched.json()["provider"] == "anthropic"
+    assert switched.json()["key"]["last4"] == "0002"
+    assert store.api_key("openai") == "sk-openai-0001"
+    readiness = client.get("/api/readiness").json()
+    assert readiness["provider"] == "anthropic" and readiness["provider_key_configured"]
+    assert readiness["models"][0] == readiness["model"] == "claude-opus-5-5"
+    # Dictation keeps using the OpenAI key, whichever provider is active.
+    assert readiness["dictation_available"] is True
+    # Key routes without a provider act on the active one.
+    client.delete("/api/settings/key", headers=LOCAL)
+    assert store.api_key("anthropic") == ""
+    assert store.api_key("openai") == "sk-openai-0001"
+
+
+def test_unknown_provider_is_rejected_without_writing(client, home):
+    for response in (
+        client.put("/api/settings", json={"price_refresh": True, "provider": "x"}, headers=LOCAL),
+        client.put("/api/settings/key", json={"api_key": "k", "provider": "x"}, headers=LOCAL),
+        client.delete("/api/settings/key?provider=x", headers=LOCAL),
+        client.post("/api/settings/key/verify?provider=x", headers=LOCAL),
+    ):
+        assert response.status_code == 422
+    assert not home.secrets_file.exists() and not home.settings_file.exists()
+
+
+def test_verify_probes_the_named_provider_default_model(client, home, host):
+    SettingsStore(home).set_api_key("gemini-key-0003", "gemini")
+    response = client.post("/api/settings/key/verify?provider=gemini", headers=LOCAL)
+    assert response.json() == {"result": "ok"}
+    assert host.probes[-1][:2] == ("gemini-key-0003", "gemini-4-argon")
+    assert host.providers[-1] == "gemini"

@@ -6,6 +6,7 @@ import { buildRunRequest, LIMIT_FIELDS, pickDevice, TEXT_LIMITS } from '../form.
 import type { CreateRunRequest, FormErrors, RunForm } from '../form.ts';
 import { appendTranscript } from '../speech.ts';
 import { changedOptionCount, startNotices } from '../start.ts';
+import { AttachButton, AttachmentList, useAttachmentUploads, useFileDrop } from './AttachmentBar.tsx';
 import { DeviceChip } from './DeviceChip.tsx';
 import { DictateButton } from './DictateButton.tsx';
 import { OptionsPanel } from './OptionsPanel.tsx';
@@ -45,12 +46,17 @@ export function StartScreen({ form, onChange, readiness, connected, checked, sub
   const [draft, setDraft] = useState('');
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [focusId, setFocusId] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const setAttachments = (update: (list: RunForm['attachments']) => RunForm['attachments']) =>
+    onChange((current) => ({ ...current, attachments: update(current.attachments) }));
+  const uploads = useAttachmentUploads({ onChange: setAttachments, onBusy: setUploading });
+  const drop = useFileDrop((files) => void uploads.upload(files));
   const optionsTrigger = useRef<HTMLButtonElement>(null);
   /** The device the operator picked in the menu; a listing never swaps it for another device. */
   const chosen = useRef<string | null>(null);
 
-  const allowed = canCreateRun(readiness, connected) && !submitting && !uncertain;
-  const canDictate = !!readiness?.provider_key_configured && connected;
+  const allowed = canCreateRun(readiness, connected) && !submitting && !uncertain && !uploading;
+  const canDictate = !!readiness?.dictation_available && connected;
   // Until the first readiness request finishes, say so instead of reporting the service as unreachable.
   const connecting = !connected && !checked;
   const notices = connecting ? [] : startNotices(readiness, connected);
@@ -133,12 +139,13 @@ export function StartScreen({ form, onChange, readiness, connected, checked, sub
         ))}
       </div>
 
-      <div className={`composer${errors.goal ? ' invalid' : ''}`}>
+      <div className={`composer${errors.goal ? ' invalid' : ''}`} {...drop}>
         <label htmlFor="goal" className="visually-hidden">Goal</label>
         <textarea id="goal" rows={3} autoFocus value={form.goal} onKeyDown={onGoalKeyDown}
           onChange={(e) => onChange((current) => ({ ...current, goal: e.target.value }))}
           placeholder="In Pantry Notes, add “milk” to the list and check it appears"
           aria-invalid={!!errors.goal} aria-describedby={goalDescribedBy} />
+        <AttachmentList attachments={form.attachments} onChange={setAttachments} disabled={submitting} />
         <p id="goal-help" className="visually-hidden">
           Enter starts the run; Shift+Enter adds a new line. Use test data only. The goal stays fixed for the whole run.
           Dictated text is added at the end; review it before starting.
@@ -152,10 +159,11 @@ export function StartScreen({ form, onChange, readiness, connected, checked, sub
             {changed > 0 ? `Options · ${changed} changed` : 'Options'}
           </button>
           <span className="composer-spacer" />
+          <AttachButton disabled={!connected || submitting} onPick={(files) => void uploads.upload(files)} />
           <DictateButton field="goal" disabled={!canDictate}
             onText={(text) => onChange((current) => ({ ...current, goal: appendTranscript(current.goal, text, TEXT_LIMITS.goal) }))} />
           <button type="submit" className="start-button" disabled={!allowed} aria-disabled={!allowed}>
-            {submitting ? 'Starting…' : 'Start'}
+            {submitting ? 'Starting…' : uploading ? 'Uploading…' : 'Start'}
           </button>
         </div>
       </div>
@@ -164,6 +172,7 @@ export function StartScreen({ form, onChange, readiness, connected, checked, sub
         {errors.goal && <p id="goal-error" className="error-text">{errors.goal}</p>}
         {errors.deviceId && <p id="device-error" className="error-text">{errors.deviceId}</p>}
         {error && <p className="error-text" role="alert">{error}</p>}
+        {uploads.errors.map((text) => <p key={text} className="error-text" role="alert">{text}</p>)}
         {uncertain && <button type="button" className="secondary small" onClick={onRefresh}>Refresh</button>}
       </div>
 
@@ -172,7 +181,7 @@ export function StartScreen({ form, onChange, readiness, connected, checked, sub
 
       <div className="privacy" role="note">
         <p>
-          Starting sends screenshots and your test text to the AI provider{form.observeOnly ? '' : ' and lets the AI operate the device'}.
+          Starting sends screenshots, your test text{form.attachments.length ? ' and the attached files' : ''} to the AI provider{form.observeOnly ? '' : ' and lets the AI operate the device'}.
           Use a test device and synthetic data.
         </p>
         <details>
@@ -180,7 +189,8 @@ export function StartScreen({ form, onChange, readiness, connected, checked, sub
           <p>
             Starting a run sends screenshots of the device and your test text to the configured AI provider
             {form.observeOnly ? '.' : ', and lets the AI operate the device (taps, typing, navigation).'} Use a test device and synthetic data.
-            Dictation sends your recording to the same provider for transcription; the audio is not stored here.
+            Attached files are sent to the same provider when the AI opens them and are stored with the run.
+            Dictation sends your recording to OpenAI for transcription; the audio is not stored here.
           </p>
         </details>
       </div>

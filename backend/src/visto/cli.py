@@ -11,7 +11,9 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from visto.adapters.ai.openai import history_data
+from visto.adapters.ai.agent import history_data
+from visto.adapters.ai.providers import PROVIDERS
+from visto.adapters.attachments import MAX_RUN_PAGES, StagedFile, promote, render
 from visto.adapters.devices import Platform
 from visto.adapters.ios.inventory import find_xcrun
 from visto.adapters.settings.store import SettingsStore
@@ -100,11 +102,20 @@ def parser():
         action="store_true",
         help="macOS: do not start the iOS tunnel, so Visto never asks for the password",
     )
-    settings = sub.add_parser("settings", help="Manage the provider key and show settings")
+    settings = sub.add_parser(
+        "settings", help="Manage the AI provider and its keys, and show settings"
+    )
     settings.add_argument(
         "action",
         choices=ACTIONS,
-        help="set-key reads one line from stdin; the key is never an argument",
+        help="set-key reads one line from stdin; the key is never an argument. "
+        "use-provider makes --provider the active provider",
+    )
+    settings.add_argument(
+        "--provider",
+        choices=tuple(PROVIDERS),
+        default=None,
+        help="AI provider the action applies to (default: the active provider)",
     )
     settings.add_argument("--home", type=Path, default=None, help="Visto home (default ~/.visto)")
     for name in ("doctor", "run", "inspect"):
@@ -124,7 +135,9 @@ def parser():
             help="Target platform; the device must match it",
         )
         p.add_argument("--appium-url", default="http://127.0.0.1:4723")
-        p.add_argument("--model", default="gpt-6-luna")
+        p.add_argument(
+            "--model", default=None, help="AI model (default: the active provider's default)"
+        )
         if name == "doctor":
             p.add_argument("--json", action="store_true", help="Machine-readable output")
         if name == "run":
@@ -138,6 +151,13 @@ def parser():
             )
             p.add_argument("--expected-result")
             p.add_argument("--constraint", action="append", default=[])
+            p.add_argument(
+                "--attach",
+                type=Path,
+                action="append",
+                default=[],
+                help="PNG, JPG or PDF reference file for the AI (repeatable)",
+            )
             p.add_argument("--wall-time-ms", type=positive, default=1200000)
             p.add_argument("--max-actions", type=positive, default=60)
             p.add_argument("--max-inferences", type=positive, default=90)
@@ -207,10 +227,22 @@ async def summary(loop, run):
     }
 
 
-async def execute(settings, goal, api_key, *, factory=build_runtime, prompt=input, output=print):
+async def execute(
+    settings,
+    goal,
+    api_key,
+    *,
+    factory=build_runtime,
+    prompt=input,
+    output=print,
+    attachments=(),
+):
     control = MutableRunControl()
     loop = factory(settings, api_key, control)
     run = new_run(settings, goal, loop.clock)
+    if attachments:
+        pages = await promote(attachments, run.run_id, loop.artifacts)
+        run = replace(run, goal=replace(goal, attachments=pages))
     emit(
         {
             "run_id": run.run_id,
@@ -337,13 +369,15 @@ def doctor(args, home: VistoHome, data_dir: Path, output) -> int:
         )
     store = SettingsStore(home)
     platform = Platform(args.platform)
-    ios = ios_prerequisites(store.load().ios) if platform is Platform.IOS and ios_host() else {}
+    stored = store.load()
+    ios = ios_prerequisites(stored.ios) if platform is Platform.IOS and ios_host() else {}
     fields = {
         "platform": platform.value,
         "configuration_only": False,
-        "api_key_present": bool(store.api_key().strip()),
+        "provider": stored.provider,
+        "api_key_present": bool(store.api_key(stored.provider).strip()),
         "device_serial_supplied": bool(args.device),
-        "model": args.model,
+        "model": args.model or PROVIDERS[stored.provider].default_model,
         "appium_url": args.appium_url,
         "data_directory": str(data_dir.resolve()),
         "lease_directory": str(home.leases.resolve()),
@@ -374,7 +408,7 @@ def main(argv=None, *, output=print, prompt=input, factory=build_runtime):
                 ios_tunnel=ios_host() and not args.no_ios_tunnel,
             )
         if args.command == "settings":
-            return run_settings(resolved_home(args), args.action)
+            return run_settings(resolved_home(args), args.action, provider=args.provider)
     except KeyboardInterrupt:
         return 130
     try:
@@ -404,16 +438,18 @@ def main(argv=None, *, output=print, prompt=input, factory=build_runtime):
             return 0
         store = SettingsStore(home)
         stored = store.load()
+        model = args.model or PROVIDERS[stored.provider].default_model
         settings = RunnerSettings(
             args.device or "configuration-check",
             data_dir,
             args.appium_url,
-            args.model,
+            model,
+            provider=stored.provider,
             lease_directory=leases,
             platform=Platform(args.platform),
             ios_signing=stored.ios,
         )
-        key = store.api_key()
+        key = store.api_key(stored.provider)
         if not key.strip():
             raise ValueError(
                 "Provider key is not configured; set it in the console Settings page"
@@ -430,8 +466,9 @@ def main(argv=None, *, output=print, prompt=input, factory=build_runtime):
             args.device,
             data_dir,
             args.appium_url,
-            args.model,
+            model,
             limits,
+            provider=stored.provider,
             lease_directory=leases,
             platform=Platform(args.platform),
             ios_signing=stored.ios,
@@ -454,6 +491,13 @@ def main(argv=None, *, output=print, prompt=input, factory=build_runtime):
                 args.goal if args.goal is not None else args.goal_file.read_text(encoding="utf-8")
             )
             goal = Goal(goal_text, tuple(args.constraint), args.expected_result)
+        # Validated before Appium or the provider are touched.
+        attachments = [
+            StagedFile("local", path.name, render(path.name, path.read_bytes()))
+            for path in args.attach
+        ]
+        if sum(len(f.pages) for f in attachments) > MAX_RUN_PAGES:
+            raise ValueError(f"A run can have at most {MAX_RUN_PAGES} attachment pages")
         with registered(home, "run"):
             prepare_data(home, data_dir)
             with (
@@ -463,7 +507,15 @@ def main(argv=None, *, output=print, prompt=input, factory=build_runtime):
                 trusted_ca_bundle(stored_ca_bundle(Toolchain(home))),
             ):
                 return asyncio.run(
-                    execute(settings, goal, key, factory=factory, output=output, prompt=prompt)
+                    execute(
+                        settings,
+                        goal,
+                        key,
+                        factory=factory,
+                        output=output,
+                        prompt=prompt,
+                        attachments=attachments,
+                    )
                 )
     except ValueError as error:
         # Only local validation error messages are exposed; provider bodies never get here.

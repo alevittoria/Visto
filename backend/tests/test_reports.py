@@ -271,3 +271,53 @@ def test_cross_run_records_and_unsupported_objects_fail_closed():
         render_json(run, (replace(history[1], run_id="other-run"),))
     with pytest.raises(ValueError):
         render_json(run, (object(),))
+
+
+def attached_fixture():
+    from visto.domain.models import AttachmentPage, Finding
+
+    run, history = fixture()
+    image = ArtifactRef(
+        "artifact-9", run.run_id, "image/png", 10, "b" * 64, "C:/private/host/layout.png"
+    )
+    pages = (
+        AttachmentPage("att-1", "fictional-flow.pdf", 1, 2, 80, 160, image),
+        AttachmentPage("att-2", "fictional-flow.pdf", 2, 2, 80, 160, image),
+    )
+    run = replace(run, goal=replace(run.goal, attachments=pages))
+    finding = Finding("Share action missing in the top bar", ("obs-1",), ("att-1",))
+    assessment = Assessment(
+        run.run_id, "decision-2", SemanticVerdict.PASSED, "Goal reached", ("obs-1",), (finding,)
+    )
+    run = run.finish(AIConclusion(run.run_id, LATER, assessment))
+    return run, history
+
+
+def test_report_lists_attachments_without_storage_keys():
+    run, history = attached_fixture()
+    data = json.loads(render_json(run, history))
+    pages = data["run"]["goal"]["attachments"]
+    assert [p["attachment_id"] for p in pages] == ["att-1", "att-2"]
+    assert pages[0]["url"] == "/api/runs/run-1/attachments/att-1"
+    assert "layout.png" not in json.dumps(data) and "storage_key" not in json.dumps(data)
+
+
+def test_report_shows_findings_with_both_links():
+    run, history = attached_fixture()
+    html = render_html(run, history)
+    assert "<h2>Findings</h2>" in html
+    assert "Share action missing in the top bar" in html
+    assert 'href="/api/runs/run-1/artifacts/obs-1"' in html
+    assert 'href="/api/runs/run-1/attachments/att-1"' in html
+    # att-2 was never cited: listed as not compared.
+    assert "Not cited by any finding" in html and "fictional-flow.pdf, page 2" in html
+    data = json.loads(render_json(run, history))
+    assert data["findings"][0]["attachment_ids"] == ["att-1"]
+
+
+def test_report_of_old_run_without_attachments_unchanged():
+    run, history = fixture()
+    html = render_html(run, history)
+    assert "<h2>Findings</h2>" not in html
+    data = json.loads(render_json(run, history))
+    assert data["findings"] == [] and data["run"]["goal"]["attachments"] == []

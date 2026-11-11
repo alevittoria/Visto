@@ -7,9 +7,11 @@ import secrets
 import socket
 import ssl
 import sys
+from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from .providers import TRANSCRIPTION_PROVIDER
 from .transport import (
     AUDIO_EXTENSIONS,
     MAX_AUDIO_BYTES,
@@ -24,6 +26,41 @@ from .transport import (
 RESPONSES_URL = "https://api.openai.com/v1/responses"
 TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions"
 MODELS_URL = "https://api.openai.com/v1/models/"
+# https://platform.claude.com/docs/en/api/versioning
+ANTHROPIC_VERSION = "2026-10-21"
+# https://ai.google.dev/gemini-api/docs/interactions (Api-Revision header).
+GEMINI_REVISION = "2026-05-20"
+
+
+@dataclass(frozen=True)
+class Endpoints:
+    """Fixed per-provider URLs and authentication; nothing here comes from the caller."""
+
+    inference: str
+    models: str
+    auth_header: str
+    auth_prefix: str = ""
+    headers: tuple[tuple[str, str], ...] = ()
+
+    def auth(self, key: str) -> dict[str, str]:
+        return {self.auth_header: self.auth_prefix + key, **dict(self.headers)}
+
+
+ENDPOINTS = {
+    "openai": Endpoints(RESPONSES_URL, MODELS_URL, "Authorization", "Bearer "),
+    "anthropic": Endpoints(
+        "https://api.anthropic.com/v1/messages",
+        "https://api.anthropic.com/v1/models/",
+        "x-api-key",
+        headers=(("anthropic-version", ANTHROPIC_VERSION),),
+    ),
+    "gemini": Endpoints(
+        "https://generativelanguage.googleapis.com/v1beta/interactions",
+        "https://generativelanguage.googleapis.com/v1beta/models/",
+        "x-goog-api-key",
+        headers=(("Api-Revision", GEMINI_REVISION),),
+    ),
+}
 
 
 class RejectRedirects(HTTPRedirectHandler):
@@ -80,15 +117,18 @@ def handle_packet(raw: bytes) -> dict:
         packet = json.loads(raw)
         probe = type(packet) is dict and "probe_model" in packet
         shapes = (
-            ({"api_key", "probe_model", "timeout_ms"},)
+            ({"provider", "api_key", "probe_model", "timeout_ms"},)
             if probe
             else (
-                {"api_key", "payload", "timeout_ms"},
-                {"api_key", "payload", "timeout_ms", "media_type"},
+                {"provider", "api_key", "payload", "timeout_ms"},
+                {"provider", "api_key", "payload", "timeout_ms", "media_type"},
             )
         )
         if type(packet) is not dict or set(packet) not in shapes:
             raise ValueError("Invalid packet")
+        if packet["provider"] not in ENDPOINTS:
+            raise ValueError("Invalid provider")
+        endpoints = ENDPOINTS[packet["provider"]]
         key, timeout = packet["api_key"], packet["timeout_ms"]
         if (
             type(key) is not str
@@ -104,7 +144,7 @@ def handle_packet(raw: bytes) -> dict:
             model = packet["probe_model"]
             if type(model) is not str or re.fullmatch(PROBE_MODEL_PATTERN, model) is None:
                 raise ValueError("Invalid model")
-            url, content_type, method = MODELS_URL + model, None, "GET"
+            url, content_type, method = endpoints.models + model, None, "GET"
         else:
             encoded = packet["payload"]
             if type(encoded) is not str:
@@ -115,7 +155,11 @@ def handle_packet(raw: bytes) -> dict:
             if "media_type" in packet:
                 # Speech transcription: the payload is audio; the form is fixed here.
                 media_type = packet["media_type"]
-                if media_type not in AUDIO_EXTENSIONS or len(payload) > MAX_AUDIO_BYTES:
+                if (
+                    packet["provider"] != TRANSCRIPTION_PROVIDER
+                    or media_type not in AUDIO_EXTENSIONS
+                    or len(payload) > MAX_AUDIO_BYTES
+                ):
                     raise ValueError("Invalid audio")
                 url = TRANSCRIPTIONS_URL
                 payload, content_type = transcription_body(payload, media_type)
@@ -123,11 +167,11 @@ def handle_packet(raw: bytes) -> dict:
                 # Validate before any request; endpoint/headers are never provided by AI.
                 if type(json.loads(payload)) is not dict:
                     raise ValueError("Invalid request JSON")
-                url, content_type = RESPONSES_URL, "application/json"
+                url, content_type = endpoints.inference, "application/json"
     except (OSError, ValueError, TypeError):
         return {"error": "provider: invalid_request"}
     try:
-        headers = {"Authorization": f"Bearer {key}"}
+        headers = endpoints.auth(key)
         if content_type is not None:
             headers["Content-Type"] = content_type
         request = Request(url, data=payload, headers=headers, method=method)

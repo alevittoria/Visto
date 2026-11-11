@@ -154,6 +154,7 @@ def test_parent_rejects_unsupported_audio_without_spawning():
 def packet(**extra):
     return json.dumps(
         {
+            "provider": "openai",
             "api_key": "private-key",
             "payload": base64.b64encode(b"\x1a\x45\xdf\xa3fake-webm").decode(),
             "timeout_ms": 1000,

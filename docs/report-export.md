@@ -54,6 +54,11 @@ unsafe identifiers fail closed instead of becoming links.
   unknown. A known subtotal of zero does not make an unknown total zero.
   Failed/unrecorded requests may consume additional unknown usage; even a fully
   known persisted-decision subtotal is not a complete provider billing claim.
+- `findings`: the AI conclusion's findings, each with its explanation, cited
+  observation and attachment IDs and their local routes; empty when there are none
+  or the run did not end with an AI conclusion. Goal attachments appear in
+  `run.goal.attachments` with a route and no storage key. The HTML report shows a
+  Findings section and lists attachment pages no finding cites.
 - `notice`: the interpretation/snapshot limitations in plain text.
 
 ## Screenshots and inert HTML

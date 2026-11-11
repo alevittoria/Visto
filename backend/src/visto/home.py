@@ -19,6 +19,11 @@ class VistoHome:
         return self.data / "device-leases"
 
     @property
+    def staging(self) -> Path:
+        """Uploaded attachments not yet claimed by a run."""
+        return self.data / "staging"
+
+    @property
     def settings_file(self) -> Path:
         return self.root / "settings.json"
 

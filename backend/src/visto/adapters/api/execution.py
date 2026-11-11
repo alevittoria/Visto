@@ -7,7 +7,8 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-from visto.adapters.ai import MAX_AUDIO_BYTES
+from visto.adapters.ai import MAX_AUDIO_BYTES, PROVIDERS
+from visto.adapters.attachments import MAX_FILE_BYTES
 from visto.adapters.devices import Platform
 from visto.adapters.pricing import ATTRIBUTION, SOURCE_NAME, SOURCE_URL
 from visto.adapters.reports import render_html, render_json
@@ -42,6 +43,10 @@ class CreateRequest(BaseModel):
     observe_only: bool = False
     platform: Platform = Field(default=Platform.ANDROID, strict=False)
     limits: LimitsRequest = Field(default_factory=LimitsRequest)
+    # Upload ids from POST /attachments, in the order the files were attached.
+    attachments: list[Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]] = Field(
+        default_factory=list, max_length=20
+    )
 
 
 class AnswerRequest(BaseModel):
@@ -88,6 +93,49 @@ async def transcription(request: Request) -> dict:
         if len(audio) > MAX_AUDIO_BYTES:
             raise HTTPException(413, "Recording is too long")
     return await service(request).transcribe(bytes(audio), request.headers.get("content-type"))
+
+
+@router.post("/attachments")
+async def upload_attachment(
+    request: Request, name: str = Query(min_length=1, max_length=255)
+) -> dict:
+    """Raw file body in; validated and staged until a run claims it or it expires."""
+    require_local_write(request)
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > MAX_FILE_BYTES:
+        raise HTTPException(413, "The file is larger than 20 MB")
+    content = bytearray()
+    async for chunk in request.stream():
+        content += chunk
+        if len(content) > MAX_FILE_BYTES:
+            raise HTTPException(413, "The file is larger than 20 MB")
+    return await service(request).upload_attachment(name, bytes(content))
+
+
+@router.delete("/attachments/{upload_id}")
+async def discard_attachment(request: Request, upload_id: str) -> dict:
+    require_local_write(request)
+    service(request).discard_attachment(upload_id)
+    return {"discarded": True}
+
+
+@router.post("/runs/{run_id}/attachments/stage")
+async def stage_run_attachments(request: Request, run_id: str) -> list[dict]:
+    require_local_write(request)
+    return await service(request).stage_from_run(run_id)
+
+
+@router.get("/runs/{run_id}/attachments/{attachment_id}")
+async def attachment_page(request: Request, run_id: str, attachment_id: str) -> Response:
+    content, media_type = await service(request).attachment_page(run_id, attachment_id)
+    return Response(
+        content,
+        media_type=media_type,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'",
+        },
+    )
 
 
 @router.post("/runs", status_code=202)
@@ -158,7 +206,7 @@ async def prices(request: Request) -> dict:
                 "output_per_m": price.output_per_m,
             }
             for model, price in sorted(history.latest().items())
-            if model in execution.settings.models
+            if any(model in provider.models for provider in PROVIDERS.values())
         },
     }
 

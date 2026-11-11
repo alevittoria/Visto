@@ -1,42 +1,57 @@
 """Screenshots sized within the provider's image limits, and coordinates mapped across.
 
-The provider resizes larger images before the model sees them, and the model then
-answers in the resized image's pixels: https://developers.openai.com/api/docs/guides/images-vision .
+A provider resizes larger images before the model sees them, and the model then
+answers in the resized image's pixels:
+https://developers.openai.com/api/docs/guides/images-vision and
+https://platform.claude.com/docs/en/build-with-claude/vision .
 Sending an image that already fits keeps the model's pixels equal to the stated size,
 so the only conversion is the one done here, back to source-screenshot pixels.
 """
 
 import io
 import math
-from dataclasses import fields, replace
+from dataclasses import dataclass, fields, replace
 
 from PIL import Image
 
 from visto.domain.commands import COMMAND_TYPES
 from visto.domain.models import Act, Action, AgentDecision
 
-# The strictest documented `high` detail limits across current models.
+
+@dataclass(frozen=True, slots=True)
+class ImageLimits:
+    max_side: int
+    patch: int
+    max_patches: int
+
+
+# OpenAI: the strictest documented `high` detail limits across current models.
 MAX_SIDE = 2048
 PATCH = 32
 MAX_PATCHES = 2500
+OPENAI_LIMITS = ImageLimits(MAX_SIDE, PATCH, MAX_PATCHES)
+# Anthropic resolution tiers: high resolution on Claude 4.7 and later, standard otherwise.
+CLAUDE_HIGH_LIMITS = ImageLimits(2576, 28, 4784)
+CLAUDE_STANDARD_LIMITS = ImageLimits(1568, 28, 1568)
 _X = ("x", "start_x", "end_x")
 _Y = ("y", "start_y", "end_y")
 
 
-def _patches(width: int, height: int) -> int:
-    return math.ceil(width / PATCH) * math.ceil(height / PATCH)
+def _patches(width: int, height: int, patch: int = PATCH) -> int:
+    return math.ceil(width / patch) * math.ceil(height / patch)
 
 
-def presented_size(width: int, height: int) -> tuple[int, int]:
+def presented_size(width: int, height: int, limits: ImageLimits = OPENAI_LIMITS) -> tuple[int, int]:
     """Largest same-aspect size within the side and patch limits; never enlarged."""
+    side, patch, patches = limits.max_side, limits.patch, limits.max_patches
     scale = min(
         1.0,
-        MAX_SIDE / max(width, height),
-        math.sqrt(MAX_PATCHES * PATCH * PATCH / (width * height)),
+        side / max(width, height),
+        math.sqrt(patches * patch * patch / (width * height)),
     )
     while True:
         size = (max(1, round(width * scale)), max(1, round(height * scale)))
-        if max(size) <= MAX_SIDE and _patches(*size) <= MAX_PATCHES:
+        if max(size) <= side and _patches(*size, patch) <= patches:
             return size
         scale *= 0.99
 

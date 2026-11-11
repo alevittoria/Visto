@@ -18,7 +18,7 @@ test('request preserves goal text verbatim, trims serial, drops blank optional v
   assert.equal(errors, null);
   assert.deepEqual(request, {
     device_id: 'emulator-5554', platform: 'android', model: null, goal: '  Open Sample Notes\nand check the list  ', expected_result: null,
-    constraints: ['No payments', 'Synthetic data only'], observe_only: true, limits: DEFAULT_LIMITS,
+    constraints: ['No payments', 'Synthetic data only'], observe_only: true, limits: DEFAULT_LIMITS, attachments: [],
   });
 });
 
@@ -82,7 +82,7 @@ test('run again prefills goal, model, mode and limits from a stored run', () => 
   assert.equal(errors, null);
   assert.deepEqual(request, {
     device_id: 'emulator-5554', platform: 'android', model: 'gpt-6-sol', goal: 'Open Sample Notes', expected_result: 'The demo note is listed',
-    constraints: ['No payments'], observe_only: true, limits,
+    constraints: ['No payments'], observe_only: true, limits, attachments: [],
   });
   form.constraints.push('changed');
   assert.deepEqual(run.goal.constraints, ['No payments'], 'stored run is not mutated');
@@ -121,4 +121,10 @@ test('picking a device sets its platform with it', () => {
   assert.equal(cleared.deviceId, '');
   assert.equal(cleared.platform, null);
   assert.equal(pickDevice(valid(), 'unlisted', devices).platform, null, 'no silent android default');
+});
+
+test('attached files travel as upload ids and a rerun form starts without stale uploads', () => {
+  const form = { ...valid(), attachments: [{ upload_id: 'c'.repeat(32), name: 'fictional.png', page_count: 1 }] };
+  assert.deepEqual(buildRunRequest(form).request.attachments, ['c'.repeat(32)]);
+  assert.deepEqual(emptyForm(DEFAULT_LIMITS).attachments, []);
 });

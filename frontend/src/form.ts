@@ -1,4 +1,5 @@
 // New-run form state and conversion to the POST /api/runs request.
+import type { StagedAttachment } from './attachments.ts';
 import type { AttachedDevice, Limits, Platform, Run } from './console.ts';
 
 export interface LimitField {
@@ -31,6 +32,8 @@ export interface RunForm {
   constraints: string[];
   observeOnly: boolean;
   limits: Record<keyof Limits, string>;
+  /** Files uploaded for this run, in the order they were attached. */
+  attachments: StagedAttachment[];
 }
 
 export interface CreateRunRequest {
@@ -42,6 +45,7 @@ export interface CreateRunRequest {
   constraints: string[];
   observe_only: boolean;
   limits: Limits;
+  attachments: string[];
 }
 
 export type FormErrors = Partial<Record<'deviceId' | 'goal' | 'expectedResult' | 'constraints' | keyof Limits, string>>;
@@ -53,7 +57,7 @@ export function displayLimit(field: LimitField, value: number): string {
 export function emptyForm(defaults: Limits): RunForm {
   const limits = {} as Record<keyof Limits, string>;
   for (const field of LIMIT_FIELDS) limits[field.key] = displayLimit(field, defaults[field.key]);
-  return { deviceId: '', platform: null, model: '', goal: '', expectedResult: '', constraints: [], observeOnly: false, limits };
+  return { deviceId: '', platform: null, model: '', goal: '', expectedResult: '', constraints: [], observeOnly: false, limits, attachments: [] };
 }
 
 /**
@@ -77,6 +81,8 @@ export function formFromRun(run: Run, models: readonly string[], defaults: Limit
     constraints: Array.isArray(run.goal?.constraints) ? [...run.goal.constraints] : [],
     observeOnly: Array.isArray(run.configuration?.capabilities) && run.configuration.capabilities.length === 0,
     limits,
+    // A stored run's files are staged again separately (stageFromRun); uploads never carry over.
+    attachments: [],
   };
 }
 
@@ -145,6 +151,7 @@ export function buildRunRequest(form: RunForm): { request: CreateRunRequest; err
       constraints,
       observe_only: form.observeOnly,
       limits,
+      attachments: form.attachments.map((item) => item.upload_id),
     },
   };
 }

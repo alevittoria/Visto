@@ -15,13 +15,16 @@ appear only when Visto runs on macOS; see [iOS setup](ios-setup.md).
 ## Settings
 
 The **Settings** button in the top bar (or `#settings`) opens the Settings page.
-While no provider key is configured, the console opens it on its own. Changes apply
+While the active AI provider has no key, the console opens it on its own. Changes apply
 to the next run without restarting Visto.
 
-- **AI provider key**: shows whether a key is configured and its last four
-  characters. Paste a key and press **Save key** to set or replace it, **Verify**
-  to check it without a billable request, **Remove** to delete it. The key is never
-  shown again after saving and never reaches the console. See
+- **AI provider**: OpenAI, Anthropic or Google Gemini; every new run uses it.
+  Choosing one saves it at once; each provider keeps its own key, and the menu
+  marks those with a key saved.
+- **Provider key**: shows whether the active provider's key is configured and its
+  last four characters. Paste a key and press **Save key** to set or replace it,
+  **Verify** to check it without a billable request, **Remove** to delete it. The
+  key is never shown again after saving and never reaches the console. See
   [provider setup](provider-setup.md).
 - **Refresh model prices daily**: on by default. Turned off, the backend stops
   contacting the price source and cost estimates use the price lists already
@@ -42,9 +45,19 @@ is preserved for the full run and a changed objective belongs in a new run. Avoi
 destructive operations unless deliberately authorized. **Enter** starts the run,
 **Shift+Enter** adds a line. **Dictate** in the input records from the microphone
 (stop it, or it stops after two minutes) and appends the server transcript to the
-goal; the Options panel has one for the expected result. Review the text before starting. It needs a configured provider key, a browser that
-can record WebM or MP4 audio, and a secure origin (`localhost` qualifies). The
-recording is sent to OpenAI for transcription and is not stored locally.
+goal; the Options panel has one for the expected result. Review the text before starting. It needs a stored OpenAI key (whichever provider
+runs the tests), a browser that can record WebM or MP4 audio, and a secure origin
+(`localhost` qualifies). The recording is sent to OpenAI for transcription and is
+not stored locally.
+
+**Attach** next to Dictate, or dropping files on the goal field, adds reference
+files for the AI: PNG, JPG or PDF, up to 20 MB each and 40 pages per run. The goal
+says what they are for, for example "check that each screen matches the attached
+layouts". Attached files appear as chips under the goal (a PDF shows its page
+count) and can be removed; Start waits until uploads finish. Above 10 pages one
+notice suggests a more capable model in Options. The AI opens files only when it
+needs them and reports differences as findings: by default a run can pass with
+findings, and it fails on them only when the goal asks for the layout to be binding.
 
 Two chips sit under the goal, next to **Start**:
 
@@ -61,8 +74,9 @@ Two chips sit under the goal, next to **Start**:
   a target that is not ready, so prepare it first; see [iOS setup](ios-setup.md).
   Configuration readiness does not prove physical connectivity or provider account
   access.
-- **Options** opens a panel with the AI model (`gpt-6-luna` default,
-  `gpt-5.6-terra`, `gpt-6-sol`; fixed for the whole run and shown in the run view;
+- **Options** opens a panel with the AI model (the active provider's models, its
+  default first; see [provider setup](provider-setup.md); fixed for the whole run
+  and shown in the run view;
   your account must have access to it, which is only checked when the run starts),
   the expected result, constraints, **Observe only** (removes mutation capabilities)
   and finite limits. When any value differs from the defaults the chip says so

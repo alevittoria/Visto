@@ -87,29 +87,34 @@ Do not expose raw filesystem paths, credentials or an unrestricted device shell.
 
 The composition root injects adapters, clock and stores, including the settings
 store of the Visto home and the managed toolchain paths (`adb`, WebDriverAgent
-project). The provider key comes only from the settings store, never from the
+project). Provider keys come only from the settings store, never from the
 process environment; sample configuration contains placeholders. Use fake adapters and a controllable
 clock by default in local tests. Billable inference and real-device evaluation
 are opt-in, require recorded prerequisites and must be reported separately.
 
-Which screenshots/text leave the computer for inference, where artifacts are
+Attached reference files are validated by their bytes and PDF pages rendered
+locally (`adapters/attachments`, pypdfium2) before they are staged; a run owns its
+pages as artifacts, and a page reaches the provider only in the turn after the AI
+asks for it. Which screenshots/text leave the computer for inference, where artifacts are
 stored and retention controls are documented in [artifact storage](../artifact-storage.md)
 and [provider setup](../provider-setup.md). Local-first storage does not imply
 local inference or provider zero retention.
 
 ## Current configuration
 
-Appium/UiAutomator2, OpenAI Responses with a model from the console/CLI
-allowlist and the latest `android-agent-v*` instructions, SQLite metadata and
+Appium/UiAutomator2, the active AI provider (OpenAI Responses, Anthropic Messages
+or Gemini Interactions) with a model from that provider's allowlist and the latest
+`android-agent-v*` instructions, SQLite metadata and
 owned screenshot files, all through the declared ports. The Appium URL is
 loopback-only. `--observe-only` supplies no device mutation capabilities.
 
-Settings live in the Visto home: `settings.json` (price refresh, iOS signing)
-and `secrets.json` (provider key in plain text, mode 0600 on POSIX, user-profile
+Settings live in the Visto home: `settings.json` (price refresh, iOS signing,
+active provider; a file without a provider means OpenAI) and `secrets.json` (one
+key per provider in plain text, mode 0600 on POSIX, user-profile
 ACL on Windows). Backend and CLI read them when used, so a change applies to the
 next run; a run snapshots what it uses at start. The settings API is write-only
-for the key and uses the console write guard. The frontend never receives the
-provider key.
+for keys and uses the console write guard. The frontend never receives a
+provider key. Saving or removing one provider's key leaves the others in place.
 
 ## Toolchain and processes
 

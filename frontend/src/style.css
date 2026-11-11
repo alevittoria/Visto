@@ -378,3 +378,13 @@ button.step-row:hover:not(:disabled) { background: var(--neutral-bg); }
   .step-receipt { grid-column: 3 / -2; grid-row: 2; max-width: none; text-align: left; }
   .step-records { padding: 0 6px 10px; }
 }
+
+/* Attached files: chips under the goal and findings in the outcome block. */
+.attachments { display: grid; gap: 6px; padding: 4px 2px; }
+.attachment-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.attachment-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 4px 6px 4px 10px; border-radius: 100px; background: var(--neutral-bg); font-size: 13px; overflow-wrap: anywhere; }
+.attachment-chip .link { padding: 0 4px; }
+.findings { margin: 12px 0; }
+.findings h3 { margin: 0 0 6px; font-size: 15px; }
+.findings ol { margin: 0; padding-left: 20px; display: grid; gap: 10px; }
+.finding p { margin: 0 0 6px; }

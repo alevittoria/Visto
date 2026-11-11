@@ -37,12 +37,29 @@ dated progress notes here.
   committed. Device inventory from two independent fixed, bounded, read-only
   Xcode commands, one for simulators and one for attached devices, so a failure
   of either still lists the other.
-- **AI adapter**: OpenAI Responses with structured decisions through a fixed
-  HTTPS child process (secret via stdin, bounded lifecycle, sanitized error
-  categories, redirects rejected). Instructions render from a shared core plus
-  one versioned notes file per platform, `android-agent-v3` and `ios-agent-v1`;
-  the rendered Android text is unchanged and a test pins it by digest.
-  Selectable models from an allowlist. Audio transcription for dictated goals.
+- **AI adapters**: three providers, one active at a time: OpenAI Responses
+  (default), Anthropic Messages and Gemini Interactions. They share one turn
+  (context, screenshot sizing, decision decoding) and differ only in wire request
+  and reply reading; each sends the same decision schema with the keywords its
+  provider rejects removed, and every reply is checked locally against the full
+  schema. Requests go through a fixed HTTPS child process (secret via stdin,
+  fixed endpoint per provider, bounded lifecycle, sanitized error categories,
+  redirects rejected). Screenshots are downsized to each provider's limits
+  (Claude per resolution tier). Instructions render from a shared core plus
+  one versioned notes file per platform, `android-agent-v4` and `ios-agent-v2`;
+  earlier versions still render and a test pins the v3 Android text by digest.
+  Selectable models from the active provider's allowlist. Audio transcription for
+  dictated goals, always with the OpenAI key.
+- **Attachments**: a run can carry PNG, JPG and PDF reference files (20 MB each,
+  40 pages per run), checked by their bytes; PDF pages are rendered locally with
+  pypdfium2. Uploads wait in an expiring staging folder until a run claims them,
+  then become owned artifacts of the run. Each turn lists them; the AI opens up to
+  four with `view_attachments` and reports differences as conclusion findings,
+  which by default do not change the verdict unless the goal makes the layout
+  binding. Console: Attach button, drop on the goal, chips, a notice above 10
+  pages, findings with screenshot and page side by side, Rerun and Edit and rerun
+  staging the files again; CLI `--attach`; reports list attachments and findings.
+  Older runs load unchanged because the codec accepts records without the new fields.
 - **Storage**: SQLite run history and owned immutable screenshot artifacts with
   scoped provenance and first-terminal-wins finalization.
 - **Platform selection**: a run carries its platform from the console or the API
@@ -58,7 +75,8 @@ dated progress notes here.
   reasoning, question block that answers and resumes, outcome block with one-click
   Rerun and Edit and rerun, step list grouped by AI decision with action overlay,
   details), a collapsible run-history sidebar (drawer on narrow screens), a
-  settings page with a write-only provider key, statistics with daily-priced cost
+  settings page with the active AI provider and a write-only key per provider,
+  statistics with daily-priced cost
   estimates and dictation; JSON/HTML report export. The device list shows both
   platforms with the platform visible, selectability follows each platform's own
   state vocabulary, and a run cannot be submitted until a device list has
@@ -71,8 +89,9 @@ dated progress notes here.
   then installs Appium from the shipped lockfile (UiAutomator2 everywhere, plus
   XCUITest on macOS). No system environment variable or `PATH` is changed.
   `visto start` runs Appium as a child process and the backend, which also
-  serves the console, from one terminal. Settings (provider key in an
-  owner-only secrets file, iOS signing values, price refresh) are read at use;
+  serves the console, from one terminal. Settings (active AI provider, one key
+  per provider in an owner-only secrets file whose earlier OpenAI-only form stays
+  valid unchanged, iOS signing values, price refresh) are read at use;
   no environment variable or `.env` file configures them. The run
   database has numbered migrations with a backup before each, and a process
   registry keeps setup and migrations away from running Visto processes. See
@@ -97,6 +116,16 @@ dated progress notes here.
   inventory commands were checked against driver documentation, driver sources
   and the installed toolchain's own output; `docs/references.md` records which
   claims rest on which evidence.
+- Attachments have local checks only (ingest and PDF rendering with generated
+  files, staging, domain validation, loop, provider request shapes, API, CLI,
+  reports, console pure modules); no live run has used them, so how well models
+  compare layouts and how they phrase findings is unknown. A password-protected PDF
+  is covered by a trailer that declares encryption, not a real encrypted file. The
+  new console components have no DOM tests and were not checked in a browser.
+- The Anthropic and Gemini adapters have local checks only (fake wire, worker
+  endpoints and headers, schema reduction, settings and key routes); no live
+  request has been made to either provider, so account access, structured-output
+  acceptance of the reduced schema, and Gemini's coordinate scale are unverified.
 - Live smoke runs on a real phone have passed for positive and negative cases,
   pause/resume/cancel through the API, and the `long_press`/`enter` commands.
   This is preliminary smoke, not a labelled evaluation: the product is
@@ -111,6 +140,14 @@ dated progress notes here.
   rotation on hardware and the labelled acceptance scenario.
 
 ## Known issues
+
+- Gemini's documentation states no image resize threshold; screenshots use the
+  OpenAI limits, and tap accuracy on Gemini is unknown until a live run.
+- `claude-haiku-4-5` has no entry in the public price list under that id, so its
+  runs have no cost estimate.
+- A turn with many large screenshots plus four attachment pages may exceed a
+  provider's request size: Visto's own bound is 24 MB, Gemini documents 20 MB for
+  inline data. Such a turn fails as an infrastructure error, not a verdict.
 
 - AI false pass on procedure-shaped goals whose final state is already visible:
   the requested procedure is skipped and the run passes.
@@ -153,7 +190,12 @@ dated progress notes here.
 1. Hands-on test round of the prompt-first console (start screen, automatic device
    discovery on iOS, question block, Rerun, history sidebar), then independent QA
    review of the console features, installation guide and Android commands.
-2. Live checks for the scenarios listed under "Not yet exercised live".
+2. Live checks for the scenarios listed under "Not yet exercised live", and a
+   live smoke run with Anthropic and with Gemini (key verify, then one positive
+   and one negative case) before calling those providers supported, and an
+   attachments smoke with fictional layouts: matching UI, a missing element
+   (expect passed with a finding), the same with a binding prompt (expect failed),
+   and a layout that matches no screen (expect it reported).
 3. Fix the known issues above, starting with the false-pass pattern.
 4. Repeated labelled evaluation following the
    [evaluation protocol](../evaluation/protocol.md); agree numeric thresholds

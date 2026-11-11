@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { findingEvidence, findingsSuffix, runAttachments } from '../attachments.ts';
 import { canDeleteRun, outcome } from '../console.ts';
 import type { Run, TerminalRecord } from '../console.ts';
 import { formatDuration, formatTime, outcomeExplanation } from '../history.ts';
@@ -65,7 +66,9 @@ export function OutcomeBlock({ run, observations, rerunBlockedReason, onRerun, o
         <span className="outcome-icon" aria-hidden="true">{icon}</span>
         <div>
           <p className="kicker">{kicker}</p>
-          <h2 id="outcome-title" className="outcome-title">{title}</h2>
+          <h2 id="outcome-title" className="outcome-title">
+            {title}{terminal.kind === 'ai_conclusion' ? findingsSuffix(terminal.assessment.findings) : ''}
+          </h2>
         </div>
       </div>
       {terminal.kind === 'ai_conclusion' && (
@@ -92,6 +95,27 @@ export function OutcomeBlock({ run, observations, rerunBlockedReason, onRerun, o
           <p className="outcome-explanation">{outcomeExplanation(run)}</p>
           {terminal.usage && <p className="help">Used {formatDuration(terminal.usage.elapsed_ms)}, {terminal.usage.actions} device actions and {terminal.usage.inferences} AI steps.</p>}
         </>
+      )}
+      {terminal.kind === 'ai_conclusion' && (terminal.assessment.findings ?? []).length > 0 && (
+        <div className="findings">
+          <h3>Findings</h3>
+          <ol>
+            {(terminal.assessment.findings ?? []).map((finding, index) => (
+              <li key={index} className="finding">
+                <p>{finding.explanation}</p>
+                <div className="thumbs">
+                  {finding.observation_ids.map((id) => <ObservationThumb key={id} id={id} entry={observations.get(id)} />)}
+                  {findingEvidence(finding, runAttachments(run)).map((link) => (
+                    <a key={link.id} className="thumb" href={link.url} target="_blank" rel="noopener noreferrer" title={link.label}>
+                      <img src={link.url} alt={`Attached ${link.label}`} loading="lazy" />
+                      <span>{link.label}</span>
+                    </a>
+                  ))}
+                </div>
+              </li>
+            ))}
+          </ol>
+        </div>
       )}
       {referenced.length > 0 && (
         <>

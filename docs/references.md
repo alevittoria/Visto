@@ -8,8 +8,8 @@ establish live integration acceptance.
   role-based task delegation, inherited permissions, explicit ownership and
   standalone project-agent TOML definitions.
 - [Computer-use agent loop](https://platform.claude.com/docs/en/agents-and-tools/tool-use/computer-use-tool):
-  conceptual reference for observe/act/observe; this does not select Anthropic as
-  the product provider or imply a desktop tool works directly on Android.
+  conceptual reference for observe/act/observe; it does not imply a desktop tool
+  works directly on Android, and the Anthropic adapter does not use it.
 
 ## Provider error handling
 
@@ -33,6 +33,11 @@ establish live integration acceptance.
   returned coordinates back to the original image". `gpt-6-luna` is not in the
   page's sizing table; its observed offset (≈0.896 for a 1178 × 2556 screenshot)
   matches the documented 2,500-patch formula.
+- [pypdfium2 Python API](https://pypdfium2.readthedocs.io/en/stable/python_api.html)
+  (BSD-3-Clause/Apache-2.0, wheels per host): `PdfDocument(bytes)` raises
+  `PdfiumError` for a damaged or password-protected file, `len(document)` is the page
+  count, `page.get_size()` is in PDF points and `page.render(scale=...).to_pil()`
+  gives a Pillow image. Attached PDF pages are rendered locally with it.
 - [Pillow `Image.resize`](https://pillow.readthedocs.io/en/stable/reference/Image.html#PIL.Image.Image.resize)
   with `Image.Resampling.LANCZOS`: local downscaling of screenshots sent to the
   provider.
@@ -47,6 +52,60 @@ establish live integration acceptance.
   structured outputs. No GPT-6 Terra page exists (404), so Terra is the 5.6 model.
 - [OpenAI data controls](https://developers.openai.com/api/docs/guides/your-data):
   `store: false` does not imply zero abuse-monitoring retention.
+
+## Anthropic provider
+
+- [Messages API structured outputs](https://platform.claude.com/docs/en/build-with-claude/structured-outputs):
+  `output_config: {format: {type: "json_schema", schema}}` with no beta header;
+  the JSON arrives in a `text` content block. Supported keywords include `anyOf`,
+  `enum`, `required` and `additionalProperties: false`; `minimum`, `maximum`,
+  `minLength`, `maxLength`, `maxItems` and `minItems` above 1 are not supported, so
+  they are removed from the sent schema and enforced locally. At most 16 union
+  parameters per schema (the decision schema uses three). `stop_reason: "refusal"`
+  and `"max_tokens"` mean the output may not match the schema.
+- [API versions](https://platform.claude.com/docs/en/api/versioning): required
+  `anthropic-version` header; `2026-10-21` is the latest and removes `temperature`,
+  `top_p` and `top_k`, which the adapter never sends.
+- [Vision](https://platform.claude.com/docs/en/build-with-claude/vision): base64
+  `image` blocks (`source.type: "base64"`, `media_type`, `data`); images above the
+  model's tier (Claude 4.7 and later: 2,576 px long edge and 4,784 patches of
+  28 × 28 px; other models: 1,568 px and 1,568 patches) are downscaled, and Claude
+  answers in the processed image's pixels, so Visto downsizes first.
+- [Models overview](https://platform.claude.com/docs/en/about-claude/models/overview):
+  `claude-opus-5-5`, `claude-sonnet-5-5` and `claude-haiku-4-5` support vision and
+  structured outputs. Opus 5.5 always thinks before answering (its `thinking`
+  parameter is left unset), which is why the output bound is 16,000 tokens.
+- [Retrieve a model](https://platform.claude.com/docs/en/api/models/retrieve):
+  `GET /v1/models/{model_id}` with `x-api-key` runs no inference; it backs the key
+  check.
+- [API and data retention](https://platform.claude.com/docs/en/build-with-claude/api-and-data-retention):
+  provider-side retention of requests.
+
+## Gemini provider
+
+- [Interactions API reference](https://ai.google.dev/api/interactions-api):
+  `POST /v1beta/interactions` with `x-goog-api-key`; `store: false` keeps nothing
+  for later retrieval; `system_instruction`, `generation_config.max_output_tokens`;
+  the reply has `status` (`completed`, `incomplete`, `failed`, ...), `steps` whose
+  `model_output` entries hold `text` content, and `usage.total_input_tokens` /
+  `total_output_tokens`. Google recommends this API for new projects;
+  `generateContent` is documented as legacy.
+- [Structured output](https://ai.google.dev/gemini-api/docs/structured-output):
+  `response_format: {type: "text", mime_type: "application/json", schema}`;
+  examples send `Api-Revision: 2026-05-20`. Supported keywords include `anyOf`,
+  `enum`, `minimum`, `maximum`, `minItems`, `maxItems`, `required` and
+  `additionalProperties`; no string length bound is listed, so `maxLength` is
+  removed from the sent schema and enforced locally.
+- [Image understanding](https://ai.google.dev/gemini-api/docs/interactions/image-understanding):
+  inline `{type: "image", data, mime_type}` input items, an optional `resolution`
+  (`high` is sent), and a 20 MB total for inline requests. No resize threshold is
+  stated, so screenshots use the OpenAI limits and coordinate accuracy is
+  unverified until a live run.
+- [Models](https://ai.google.dev/gemini-api/docs/models): `gemini-4-argon`,
+  `gemini-4-carbon` and `gemini-3.8-flash` take image input; [Get a model](https://ai.google.dev/api/models)
+  (`GET /v1beta/models/{model}`) backs the key check without inference.
+- [Data logging and sharing](https://ai.google.dev/gemini-api/docs/logs-policy):
+  provider-side retention of requests.
 - [Python SQLite connections](https://docs.python.org/3.12/library/sqlite3.html#sqlite3.connect),
   [transaction control](https://docs.python.org/3.12/library/sqlite3.html#transaction-control),
   [bound SQL values](https://docs.python.org/3.12/library/sqlite3.html#how-to-use-placeholders-to-bind-values-in-sql-queries):
@@ -171,7 +230,8 @@ retry arbitrary failures or infer orientation.
   JSON refreshed daily at 04:00 UTC from provider price pages; `models[]` with
   `id`, `provider`, `pricing.inputPerM`/`outputPerM` in USD per 1M tokens, plus
   `lastUpdated`. Terms: personal/research/internal business use with attribution;
-  commercial redistribution needs permission. OpenAI publishes no pricing API
+  commercial redistribution needs permission. Visto keeps the `openai`,
+  `anthropic` and `google` entries. OpenAI publishes no pricing API
   ([forum](https://community.openai.com/t/is-there-an-endpoint-to-programmatically-fetch-openai-model-pricing/1229924)).
 
 ## Dictated goals
@@ -195,7 +255,8 @@ retry arbitrary failures or infer orientation.
   `GET /v1/models/{model}` with a bearer key returns the model object (`id`,
   `created`, `object`, `owned_by`) and runs no inference, so the settings key
   check probes the default model without cost. 401/403 mean a rejected key, 404
-  an unavailable model.
+  an unavailable model. The Anthropic and Gemini checks use the model routes
+  listed in their sections above and map status codes the same way.
 
 ## iOS
 
